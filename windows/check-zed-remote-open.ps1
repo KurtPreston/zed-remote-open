@@ -3,9 +3,9 @@
     Checks that every piece of the Zed remote-open path is in place on Windows.
 
 .DESCRIPTION
-    Verifies the Zed CLI, the ssh_connections entry and its reverse-forward args,
-    the Scheduled Task, the loopback listener, and the log. Nothing here changes
-    state unless you pass -Probe.
+    Verifies the Zed CLI, the ssh_connections entry with its reverse-forward and
+    connection-sharing args, the Scheduled Task, the loopback listener, and the
+    log. Nothing here changes state unless you pass -Probe.
 
 .PARAMETER RemoteHost
     The ssh_connections host alias expected to carry the reverse forward.
@@ -161,6 +161,28 @@ else {
                 }
                 else {
                     Test-Bad 'reverse tunnel missing' "expected: -R $expectedForward   found: $($entryArgs -join ' ')"
+                }
+
+                # Only one connection can bind the port on the dev box, so without a
+                # shared master the forward belongs to whichever project connected
+                # first and dies with it. Zed's own ControlPath is a random temp dir,
+                # which no other connection can find.
+                $controlPath = $entryArgs | Where-Object { $_ -match '^(-o)?\s*ControlPath=' } | Select-Object -First 1
+                $controlPersist = $entryArgs | Where-Object { $_ -match '^(-o)?\s*ControlPersist=' } | Select-Object -First 1
+                if (-not $controlPath) {
+                    Test-Warn 'no shared ControlPath' 'projects each get their own connection; the tunnel dies with whichever one owns it'
+                }
+                elseif (-not $controlPersist) {
+                    Test-Warn 'ControlPath without ControlPersist' "$controlPath -- the tunnel still dies with the last project to close"
+                }
+                else {
+                    Test-Ok 'connection sharing configured' "$controlPath $controlPersist"
+                }
+
+                # Turns the expected "already bound" warning on every connection after
+                # the first into a hard connection failure.
+                if ($entryArgs | Where-Object { $_ -match '^(-o)?\s*ExitOnForwardFailure=yes' }) {
+                    Test-Bad 'ExitOnForwardFailure=yes' 'every connection after the first will refuse to connect; drop it'
                 }
             }
         }
