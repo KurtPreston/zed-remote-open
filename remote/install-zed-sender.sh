@@ -70,6 +70,10 @@ chmod +x "$source_zed"
 
 step "linking into $bin_dir"
 mkdir -p "$bin_dir"
+# Absolute and slash-normalized, so comparing it against PATH entries below is
+# a sound string match.
+bin_dir=$(cd "$bin_dir" && pwd)
+link="$bin_dir/zed"
 
 if [[ -e $link || -L $link ]]; then
     if [[ -L $link && $(realpath "$link") == "$source_zed" ]]; then
@@ -89,9 +93,24 @@ fi
 
 step "checking the install"
 
+# The stock ~/.profile, and most hand-written rc files, add ~/.local/bin only
+# when it already exists -- so on a first install the mkdir above lands a moment
+# too late for this shell, and the directory is missing from PATH through no
+# fault of the config. A fresh shell, which sees the directory, says which case
+# this is: something to fix in the rc, or just a shell to restart.
 case ":$PATH:" in
-    *":$bin_dir:"*) detail "$bin_dir is on PATH" ;;
-    *) warn "$bin_dir is not on PATH; add it in your shell rc" ;;
+    *":$bin_dir:"*)
+        detail "$bin_dir is on PATH"
+        ;;
+    *)
+        fresh_path=$(bash -lc 'printf "%s" "$PATH"' 2>/dev/null || true)
+        if [[ ":$fresh_path:" == *":$bin_dir:"* ]]; then
+            warn "$bin_dir is missing from this shell's PATH; a new shell has it"
+        else
+            warn "$bin_dir is not on PATH; add to your shell rc:"
+            detail "export PATH=\"$bin_dir:\$PATH\""
+        fi
+        ;;
 esac
 
 # The sender has to win the PATH lookup for `zed .` to reach it at all, and a
