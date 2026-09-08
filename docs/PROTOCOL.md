@@ -1,9 +1,10 @@
 # Wire protocol
 
-This is the contract between the sender on the dev box and the listener on the
-workstation. It is deliberately tiny. Any platform-specific listener in this repo
-must implement exactly this, and must not extend it — the sender is already
-written and deployed.
+This is the contract between the sender on the dev box
+([`remote/bin/zed`](../remote/bin/zed)) and the listener on the workstation. It is
+deliberately tiny. Any platform-specific listener in this repo must implement
+exactly this, and must not extend it — changing the wire format means changing
+every side at once.
 
 ## Transport
 
