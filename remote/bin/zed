@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+
+# Zed
+# Opens a path in Zed from a dev box Zed reaches over remote SSH, by handing an
+# ssh:// URL to the listener at the far end of the reverse tunnel. With no
+# session open, and so no tunnel, delegates to the box's own Zed CLI.
+
+set -euo pipefail
+
+self=$(realpath "${BASH_SOURCE[0]}")
+
+# The Zed CLI proper, skipping this script wherever it sits on PATH.
+real_zed() {
+    local dir candidate
+    local IFS=:
+    for dir in $PATH; do
+        [[ -n $dir ]] || continue
+        candidate="$dir/zed"
+        [[ -f $candidate && -x $candidate ]] || continue
+        [[ $(realpath "$candidate") != "$self" ]] || continue
+        printf '%s\n' "$candidate"
+        return 0
+    done
+    return 1
+}
+
+# Names this box as the workstation's Zed knows it, and has no sane default: the
+# alias comes from the workstation's ssh_connections, so only that side knows it.
+if [[ -z ${ZED_SSH_HOST:-} ]]; then
+    echo "zed: ZED_SSH_HOST is unset" >&2
+    echo "  set it to this box's host alias from the workstation's Zed" >&2
+    echo "  ssh_connections, e.g. export ZED_SSH_HOST=desktop" >&2
+    exit 1
+fi
+
+if [[ ${1:-} == -* ]]; then
+    echo "zed: options are not supported when forwarding to $ZED_SSH_HOST; pass a path" >&2
+    exit 1
+fi
+
+target="${1:-.}"
+path=$target
+suffix=""
+
+# A trailing :line[:col] only means a location when the part before it exists;
+# otherwise it belongs to the filename. The two forms are matched separately
+# because a greedy .+ otherwise swallows the line number of a file:line:col.
+if [[ $target =~ ^(.+):([0-9]+):([0-9]+)$ ]] && [[ -e ${BASH_REMATCH[1]} ]]; then
+    path=${BASH_REMATCH[1]}
+    suffix=":${BASH_REMATCH[2]}:${BASH_REMATCH[3]}"
+elif [[ $target =~ ^(.+):([0-9]+)$ ]] && [[ -e ${BASH_REMATCH[1]} ]]; then
+    path=${BASH_REMATCH[1]}
+    suffix=":${BASH_REMATCH[2]}"
+fi
+
+if [[ ! -e $path ]]; then
+    echo "zed: cannot access '$target'" >&2
+    exit 1
+fi
+
+port="${ZED_OPEN_PORT:-7682}"
+url="ssh://${ZED_SSH_HOST}$(realpath "$path")${suffix}"
+
+# /dev/tcp keeps this free of netcat, whose -N/-q0 flags differ between builds.
+# The braces put bash's own "connection refused" on the suppressed stderr.
+if ! { exec 3<>"/dev/tcp/127.0.0.1/$port"; } 2>/dev/null; then
+    if cli=$(real_zed); then
+        exec "$cli" "$@"
+    fi
+    echo "zed: nothing is listening on 127.0.0.1:$port" >&2
+    echo "  the reverse tunnel needs an active Zed remote session to this box" >&2
+    echo "  fallback — run on the workstation: zed $url" >&2
+    exit 1
+fi
+
+printf '%s\n' "$url" >&3
+exec 3<&-
+
+echo "Opening $url"
