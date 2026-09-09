@@ -3,12 +3,16 @@
     Checks that every piece of the Zed remote-open path is in place on Windows.
 
 .DESCRIPTION
-    Verifies the Zed CLI, the ssh_connections entry with its reverse-forward and
-    connection-sharing args, the Scheduled Task, the loopback listener, and the
-    log. Nothing here changes state unless you pass -Probe.
+    Verifies the Zed CLI, the ssh_connections entry, both Scheduled Tasks, the
+    reverse tunnel, the loopback listener, and the logs. Nothing here changes state
+    unless you pass -Probe.
+
+    What it expects of Zed's args depends on which task is installed: with the
+    tunnel task registered the forward belongs to it, and an -R left in Zed's args
+    only competes for the same remote port.
 
 .PARAMETER RemoteHost
-    The ssh_connections host alias expected to carry the reverse forward.
+    The ssh_connections host alias, and the tunnel's ssh destination.
 
 .PARAMETER Probe
     Send a real URL through the listener. This opens a Zed window.
@@ -30,9 +34,14 @@ param(
 
     [string]$TaskName = 'zed-open-listener',
 
+    [string]$TunnelTaskName = 'zed-open-tunnel',
+
     [switch]$Probe,
 
-    [switch]$CheckRemote
+    [switch]$CheckRemote,
+
+    # How long the tunnel's ssh has to survive before its forward counts as bound.
+    [int]$EstablishedSeconds = 10
 )
 
 Set-StrictMode -Version Latest
@@ -113,6 +122,25 @@ Write-Host ''
 Write-Host "zed-remote-open doctor (host '$RemoteHost', port $Port)" -ForegroundColor Cyan
 Write-Host ''
 
+$expectedForward = "{0}:127.0.0.1:{0}" -f $Port
+
+# Read up front: what the Zed args should look like depends on whether the tunnel
+# task exists to own the forward, and that section prints further down.
+$tunnelTask = Get-ScheduledTask -TaskName $TunnelTaskName -ErrorAction SilentlyContinue
+
+# Every ssh holding the forward, whoever started it. The supervisor's is the one
+# carrying ExitOnForwardFailure; anything else is a Zed connection still
+# configured with -R, and the two cannot both have the port.
+function Get-ForwardSshProcess {
+    @(
+        Get-CimInstance Win32_Process -Filter "Name='ssh.exe'" -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.CommandLine -and
+                $_.CommandLine -match [regex]::Escape("-R $expectedForward")
+            }
+    )
+}
+
 # --- 1. Zed CLI -------------------------------------------------------------
 Write-Host 'Zed CLI'
 $zedPath = $null
@@ -136,7 +164,7 @@ if (-not (Test-Path -LiteralPath $settingsPath)) {
 }
 else {
     Test-Ok 'settings.json' $settingsPath
-    $expectedForward = "{0}:127.0.0.1:{0}" -f $Port
+    $raw = ''
     try {
         $raw = Get-Content -LiteralPath $settingsPath -Raw
         $json = (Remove-TrailingComma -Text (Remove-JsonComment -Text $raw)) | ConvertFrom-Json
@@ -156,32 +184,37 @@ else {
                 Test-Ok "ssh_connections entry for '$RemoteHost'"
                 $entryArgs = @()
                 if ($entry.PSObject.Properties.Name -contains 'args') { $entryArgs = @($entry.args) }
-                if ($entryArgs -contains $expectedForward -and $entryArgs -contains '-R') {
+                # Only one process can bind the port on the dev box. With the tunnel
+                # task installed that process is the task's own ssh, and an -R still
+                # sitting in Zed's args just races it for the same port.
+                $hasForward = ($entryArgs -contains $expectedForward -and $entryArgs -contains '-R')
+                if ($tunnelTask) {
+                    if ($hasForward) {
+                        Test-Warn 'Zed still carries the -R forward' "'$TunnelTaskName' owns it now; whichever binds first wins and the other retries -- drop -R from args"
+                    }
+                    else {
+                        Test-Ok 'no -R in Zed args' "'$TunnelTaskName' owns the forward"
+                    }
+                }
+                elseif ($hasForward) {
                     Test-Ok 'reverse tunnel configured' "args: $($entryArgs -join ' ')"
+                    Test-Warn 'the forward rides Zed connections' 'it dies with whichever project owns it; install the tunnel task instead'
                 }
                 else {
-                    Test-Bad 'reverse tunnel missing' "expected: -R $expectedForward   found: $($entryArgs -join ' ')"
+                    Test-Bad 'nothing provides the reverse tunnel' "install the tunnel task, or put -R $expectedForward in args"
                 }
 
-                # Only one connection can bind the port on the dev box, so without a
-                # shared master the forward belongs to whichever project connected
-                # first and dies with it. Zed's own ControlPath is a random temp dir,
-                # which no other connection can find.
-                $controlPath = $entryArgs | Where-Object { $_ -match '^(-o)?\s*ControlPath=' } | Select-Object -First 1
-                $controlPersist = $entryArgs | Where-Object { $_ -match '^(-o)?\s*ControlPersist=' } | Select-Object -First 1
-                if (-not $controlPath) {
-                    Test-Warn 'no shared ControlPath' 'projects each get their own connection; the tunnel dies with whichever one owns it'
-                }
-                elseif (-not $controlPersist) {
-                    Test-Warn 'ControlPath without ControlPersist' "$controlPath -- the tunnel still dies with the last project to close"
-                }
-                else {
-                    Test-Ok 'connection sharing configured' "$controlPath $controlPersist"
+                # Multiplexing would be the natural fix for sharing one forward
+                # between projects, and is what the Linux/macOS recipes reach for,
+                # but Win32-OpenSSH has never implemented it.
+                $control = @($entryArgs | Where-Object { $_ -match '^(-o)?\s*Control(Master|Path|Persist)=' })
+                if ($control.Count -gt 0) {
+                    Test-Bad 'ControlMaster args present' "Windows OpenSSH cannot multiplex, so these fail every connection with 'getsockname failed: Not a socket' -- remove $($control -join ' ')"
                 }
 
                 # Turns the expected "already bound" warning on every connection after
                 # the first into a hard connection failure.
-                if ($entryArgs | Where-Object { $_ -match '^(-o)?\s*ExitOnForwardFailure=yes' }) {
+                if ($hasForward -and ($entryArgs | Where-Object { $_ -match '^(-o)?\s*ExitOnForwardFailure=yes' })) {
                     Test-Bad 'ExitOnForwardFailure=yes' 'every connection after the first will refuse to connect; drop it'
                 }
             }
@@ -190,27 +223,47 @@ else {
     catch {
         # Fall back to a text match so a doctor run is still useful on exotic JSONC.
         Test-Warn 'could not parse settings.json' $_.Exception.Message
-        if ($raw -match [regex]::Escape($expectedForward)) { Test-Ok 'reverse tunnel string present (text match)' }
-        else { Test-Bad 'reverse tunnel string not found (text match)' "expected -R $expectedForward" }
+        $forwardInText = $raw -match [regex]::Escape($expectedForward)
+        if ($tunnelTask) {
+            if ($forwardInText) { Test-Warn 'the forward appears in settings.json (text match)' "'$TunnelTaskName' owns it; drop -R from args" }
+            else { Test-Ok 'no forward in settings.json (text match)' }
+        }
+        elseif ($forwardInText) { Test-Ok 'reverse tunnel string present (text match)' }
+        else { Test-Bad 'reverse tunnel string not found (text match)' "expected -R $expectedForward, or the tunnel task" }
     }
 }
 
-# --- 3. Scheduled Task ------------------------------------------------------
+# --- 3. Scheduled Tasks -----------------------------------------------------
+function Test-TaskHealth {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Microsoft.Management.Infrastructure.CimInstance]$Task
+    )
+    Test-Ok "task '$Name' registered" "state: $($Task.State)"
+    $info = Get-ScheduledTaskInfo -TaskName $Name -ErrorAction SilentlyContinue
+    if ($info) { Test-Ok 'last run' "$($info.LastRunTime) (result $($info.LastTaskResult))" }
+    if ($Task.Settings.MultipleInstances -ne 'IgnoreNew') {
+        Test-Warn 'MultipleInstances is not IgnoreNew' 'the watchdog may stack duplicate instances'
+    }
+    $hasWatchdog = @($Task.Triggers | Where-Object { $_.Repetition -and $_.Repetition.Interval }).Count -gt 0
+    if ($hasWatchdog) { Test-Ok 'watchdog trigger present' } else { Test-Warn 'no repeating watchdog trigger' }
+}
+
 Write-Host ''
-Write-Host 'Scheduled Task'
+Write-Host 'Scheduled Tasks'
 $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 if (-not $task) {
     Test-Bad "task '$TaskName' not registered" 'run install-zed-listener.ps1'
 }
 else {
-    Test-Ok "task '$TaskName' registered" "state: $($task.State)"
-    $info = Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction SilentlyContinue
-    if ($info) { Test-Ok 'last run' "$($info.LastRunTime) (result $($info.LastTaskResult))" }
-    if ($task.Settings.MultipleInstances -ne 'IgnoreNew') {
-        Test-Warn 'MultipleInstances is not IgnoreNew' 'the watchdog may stack duplicate instances'
-    }
-    $hasWatchdog = @($task.Triggers | Where-Object { $_.Repetition -and $_.Repetition.Interval }).Count -gt 0
-    if ($hasWatchdog) { Test-Ok 'watchdog trigger present' } else { Test-Warn 'no repeating watchdog trigger' }
+    Test-TaskHealth -Name $TaskName -Task $task
+}
+
+if (-not $tunnelTask) {
+    Test-Warn "task '$TunnelTaskName' not registered" 'without it the forward depends on a Zed project staying open'
+}
+else {
+    Test-TaskHealth -Name $TunnelTaskName -Task $tunnelTask
 }
 
 # --- 4. Listener ------------------------------------------------------------
@@ -230,20 +283,64 @@ if ($wildcard.Count -gt 0) {
     Test-Bad 'port is bound beyond loopback' (($wildcard | ForEach-Object { $_.LocalAddress }) -join ', ')
 }
 
-# --- 5. Log -----------------------------------------------------------------
-Write-Host ''
-Write-Host 'Log'
-$logFile = Join-Path $InstallDir 'zed-listener.log'
-if (Test-Path -LiteralPath $logFile) {
-    $item = Get-Item -LiteralPath $logFile
-    Test-Ok 'log file' "$logFile ($([int]($item.Length / 1KB)) KB, modified $($item.LastWriteTime))"
-    Get-Content -LiteralPath $logFile -Tail 3 | ForEach-Object { Write-Host "         | $_" -ForegroundColor DarkGray }
-}
-else {
-    Test-Warn 'no log file yet' $logFile
+# --- 5. Tunnel --------------------------------------------------------------
+if ($tunnelTask) {
+    Write-Host ''
+    Write-Host 'Tunnel'
+    # PowerShell unrolls a one-element array on return, so re-wrap it here.
+    $forwarders = @(Get-ForwardSshProcess)
+    $signature = [regex]::Escape('ExitOnForwardFailure=yes')
+    $rival = @($forwarders | Where-Object { $_.CommandLine -notmatch $signature })
+    $rivalPids = ($rival | ForEach-Object { $_.ProcessId }) -join ', '
+
+    # Existence proves nothing: ExitOnForwardFailure kills a losing claimant a
+    # second or two into every retry, so merely catching one alive would report a
+    # tunnel that never binds. Surviving that window is the evidence.
+    $ours = @($forwarders | Where-Object { $_.CommandLine -match $signature })
+    $ssh = @($ours | Where-Object { ((Get-Date) - $_.CreationDate).TotalSeconds -ge $EstablishedSeconds })
+
+    if ($ssh.Count -gt 0) {
+        Test-Ok "ssh holding -R $expectedForward" "pid $($ssh[0].ProcessId)"
+        if ($ssh.Count -gt 1) {
+            Test-Warn 'more than one tunnel ssh' (($ssh | ForEach-Object { $_.ProcessId }) -join ', ')
+        }
+        if ($rival.Count -gt 0) {
+            Test-Warn 'a Zed connection also asks for this forward' "pid $rivalPids -- it lost the race and is running without one"
+        }
+    }
+    elseif ($rival.Count -gt 0) {
+        Test-Bad 'the tunnel cannot bind the forward' "pid $rivalPids started while -R was still in Zed's args and most likely still holds it; reconnect those projects and the task takes the port"
+    }
+    elseif ($ours.Count -gt 0) {
+        Test-Warn 'tunnel ssh just started' "pid $($ours[0].ProcessId), too young to tell whether the forward took"
+    }
+    else {
+        Test-Bad "no ssh holding -R $expectedForward" "the supervisor retries with backoff; check $(Join-Path $InstallDir 'zed-tunnel.log')"
+    }
 }
 
-# --- 6. Optional probe ------------------------------------------------------
+# --- 6. Logs ----------------------------------------------------------------
+function Show-Log {
+    param(
+        [Parameter(Mandatory)][string]$Label,
+        [Parameter(Mandatory)][string]$Path
+    )
+    if (Test-Path -LiteralPath $Path) {
+        $item = Get-Item -LiteralPath $Path
+        Test-Ok $Label "$Path ($([int]($item.Length / 1KB)) KB, modified $($item.LastWriteTime))"
+        Get-Content -LiteralPath $Path -Tail 3 | ForEach-Object { Write-Host "         | $_" -ForegroundColor DarkGray }
+    }
+    else {
+        Test-Warn "no $Label yet" $Path
+    }
+}
+
+Write-Host ''
+Write-Host 'Logs'
+Show-Log -Label 'listener log' -Path (Join-Path $InstallDir 'zed-listener.log')
+if ($tunnelTask) { Show-Log -Label 'tunnel log' -Path (Join-Path $InstallDir 'zed-tunnel.log') }
+
+# --- 7. Optional probe ------------------------------------------------------
 if ($Probe) {
     Write-Host ''
     Write-Host 'Probe (opens a Zed window)'
@@ -259,7 +356,7 @@ if ($Probe) {
     }
 }
 
-# --- 7. Optional remote check ----------------------------------------------
+# --- 8. Optional remote check ----------------------------------------------
 if ($CheckRemote) {
     Write-Host ''
     Write-Host "Remote ($RemoteHost)"
@@ -273,6 +370,9 @@ if ($CheckRemote) {
         if ($text -match 'SENDER_OK') { Test-Ok 'zed sender on remote PATH' } else { Test-Warn 'no zed sender on remote PATH' }
         if ($text -match 'TUNNEL_OK') {
             Test-Ok "remote sshd is forwarding 127.0.0.1:$Port"
+        }
+        elseif ($tunnelTask) {
+            Test-Bad "remote is not listening on 127.0.0.1:$Port" "'$TunnelTaskName' should keep it bound at all times"
         }
         else {
             Test-Warn "remote is not listening on 127.0.0.1:$Port" 'expected unless a Zed remote session is currently connected'

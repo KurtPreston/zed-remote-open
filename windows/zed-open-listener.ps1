@@ -9,7 +9,7 @@
 
     Log lines go to stdout, and additionally to -LogFile when given. The listener
     opens that file itself rather than letting the wrapper redirect stdout into it;
-    see the comment on Open-LogWriter for why that matters.
+    see the comment on Open-LogWriter in ZedLog.ps1 for why that matters.
 
 .PARAMETER Port
     Loopback port to listen on. Must match the remote end of the SSH -R forward.
@@ -40,50 +40,13 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:LogWriter = $null
+. (Join-Path $PSScriptRoot 'ZedLog.ps1')
 
 # Host, then an absolute POSIX path, then optional :line[:col]. The path charset
 # excludes ';', '&', '|', quotes and control characters, so a request cannot smuggle
 # shell syntax even if some future caller does interpolate it. ':' is excluded from
 # the path so the line/column suffix is never ambiguous.
 $UrlPattern = '^ssh://[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9 ._+@~%/-]*(?::[0-9]{1,9}(?::[0-9]{1,9})?)?$'
-
-# The listener owns its log file instead of having the wrapper redirect stdout
-# into it. When a process starts a child with UseShellExecute=false, Windows
-# duplicates *every* inheritable handle into that child -- redirecting the child's
-# std streams does not prevent it. A shell redirect like `>> log` produces exactly
-# such an inheritable handle, so Zed, and then the long-lived ssh.exe Zed spawns
-# for the remote session, would hold the log open for the whole session. The next
-# restart could then never reopen it, which silently disabled the watchdog.
-# A handle opened here is not inheritable, so nothing downstream can pin it.
-function Open-LogWriter {
-    param([string]$Path)
-    if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
-    $dir = Split-Path -Parent $Path
-    if ($dir -and -not (Test-Path -LiteralPath $dir)) {
-        New-Item -ItemType Directory -Path $dir -Force | Out-Null
-    }
-    # ReadWrite sharing so the log stays tailable while the listener runs.
-    $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Append,
-        [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)
-    $writer = [System.IO.StreamWriter]::new($stream)
-    $writer.AutoFlush = $true
-    return $writer
-}
-
-function Write-Log {
-    param(
-        [Parameter(Mandatory)][string]$Message,
-        [ValidateSet('INFO', 'WARN', 'ERROR', 'FATAL')][string]$Level = 'INFO'
-    )
-    $ts = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss.fff')
-    $line = '{0} [{1}] {2}' -f $ts, $Level, $Message
-    [Console]::Out.WriteLine($line)
-    [Console]::Out.Flush()
-    if ($null -ne $script:LogWriter) {
-        try { $script:LogWriter.WriteLine($line) } catch { }
-    }
-}
 
 function Resolve-ZedExe {
     param([string]$Explicit)

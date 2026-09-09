@@ -29,7 +29,7 @@ workstation platform gets its own listener.
 | Side | Status |
 | --- | --- |
 | Dev box sender | `remote/` — bash sender + symlink installer |
-| Windows listener | `windows/` — PowerShell listener + Scheduled Task installer |
+| Windows listener | `windows/` — PowerShell listener + tunnel supervisor + Scheduled Task installer |
 | macOS listener | not yet |
 | Linux listener | not yet |
 
@@ -70,10 +70,12 @@ zed src/main.rs          # one file
 zed src/main.rs:42:7     # at a line and column
 ```
 
-With no Zed remote session open to this box, nothing is listening on the tunnel
-port, and the sender delegates to the box's own Zed CLI if it has one — so `zed .`
-still opens Zed locally when you are sitting at the machine. With no local CLI
-either, it prints the `ssh://` URL to run on the workstation by hand.
+A workstation that keeps the tunnel up as its own task, as the Windows installer
+does, leaves the port listening whether or not a Zed window is open, so this works
+at any time. With nothing on the other end of the tunnel, the sender delegates to
+the box's own Zed CLI if it has one — so `zed .` still opens Zed locally when you
+are sitting at the machine. With no local CLI either, it prints the `ssh://` URL
+to run on the workstation by hand.
 
 Options are rejected while forwarding: the listener only accepts a URL, so
 there is nothing to pass them to.
@@ -87,9 +89,17 @@ cd windows
 .\install-zed-listener.ps1
 ```
 
-This copies the listener to `%LOCALAPPDATA%\zed-listener`, resolves the Zed CLI,
-and registers a hidden Scheduled Task named `zed-open-listener` that starts at
-logon and restarts itself within a minute if it dies.
+This copies both scripts to `%LOCALAPPDATA%\zed-listener`, resolves the Zed CLI
+and `ssh.exe`, and registers two hidden Scheduled Tasks that start at logon and
+restart themselves within a minute if they die:
+
+| Task | Does |
+| --- | --- |
+| `zed-open-listener` | serves `127.0.0.1:7682` and hands each URL to the local Zed |
+| `zed-open-tunnel` | keeps `ssh -N -R 7682:127.0.0.1:7682 desktop` up |
+
+Pass `-RemoteHost` if your dev box is not the default `desktop`; the tunnel needs
+it, and it has to be the same alias Zed and `ZED_SSH_HOST` use.
 
 Re-running is idempotent. To remove everything:
 
@@ -97,11 +107,16 @@ Re-running is idempotent. To remove everything:
 .\install-zed-listener.ps1 -Uninstall
 ```
 
-Useful switches: `-Port`, `-ZedExe`, `-InstallDir`, `-TaskName`, `-NoStart`.
+Useful switches: `-Port`, `-RemoteHost`, `-ZedExe`, `-SshExe`, `-InstallDir`,
+`-TaskName`, `-TunnelTaskName`, `-NoTunnel`, `-NoStart`.
 
-The Zed CLI path is resolved at **install** time and baked into the task
-arguments. A Scheduled Task runs with a minimal PATH that does not include Zed's
-install directory, so resolving `zed` at runtime would fail.
+Both the Zed CLI and `ssh.exe` are resolved at **install** time and baked into the
+task arguments. A Scheduled Task runs with a minimal PATH that does not include
+Zed's install directory, so resolving `zed` at runtime would fail.
+
+The tunnel authenticates with `BatchMode=yes`, so nothing can prompt an invisible
+process. Key auth to the dev box has to already work unattended — an encrypted key
+with no agent, or a host key not yet in `known_hosts`, fails the connection.
 
 ### Check
 
@@ -109,67 +124,76 @@ install directory, so resolving `zed` at runtime would fail.
 .\check-zed-remote-open.ps1
 ```
 
-Verifies the Zed CLI, the `ssh_connections` entry and its `-R` forward, the
-Scheduled Task, the loopback binding, and the log. Add `-Probe` to push a real URL
+Verifies the Zed CLI, the `ssh_connections` entry, both Scheduled Tasks, the
+tunnel, the loopback binding, and the logs. Add `-Probe` to push a real URL
 through the listener, or `-CheckRemote` for a read-only SSH check of the dev box.
 
-### Log
+### Logs
 
 ```
 %LOCALAPPDATA%\zed-listener\zed-listener.log
+%LOCALAPPDATA%\zed-listener\zed-tunnel.log
 ```
 
 ### Zed configuration
 
-The workstation's `settings.json` needs the host alias, the reverse forward, and
-a shared control socket:
+The workstation's `settings.json` only needs the host alias:
 
 ```json
 "ssh_connections": [
   {
-    "host": "desktop",
-    "args": [
-      "-o", "ControlMaster=auto",
-      "-o", "ControlPath=~/.ssh/zed-%r@%h:%p",
-      "-o", "ControlPersist=10m",
-      "-R", "7682:127.0.0.1:7682"
-    ]
+    "host": "desktop"
   }
 ]
 ```
 
-The `host` value is what appears in the URL; Zed resolves it through this config
-rather than as a real hostname. It is the value the dev box exports as
-`ZED_SSH_HOST`, so the two have to agree.
+The `host` value is what appears in the URL; Zed resolves it through your
+`~/.ssh/config` rather than as a real hostname. It is the value the dev box
+exports as `ZED_SSH_HOST`, so the two have to agree.
 
-Zed's native `port_forwards` setting cannot express this forward — it only ever
-emits `-L` — so `-R` has to come through `args`.
+Do **not** add `-R 7682:127.0.0.1:7682` to `args`. The `zed-open-tunnel` task owns
+that forward, and only one process can bind the port on the dev box, so a second
+claimant just loses the race and retries.
 
-### Why the control socket
+### Why a separate tunnel task
 
-Only one process can bind `127.0.0.1:7682` on the dev box, so with several
-projects open only the first connection's forward succeeds; the rest log
+The forward used to ride Zed's own connections through `args`, since Zed's native
+`port_forwards` setting only ever emits `-L`. That works with one project open and
+degrades from there: only the first connection's forward succeeds and the rest log
 
 ```
 Warning: remote port forwarding failed for listen port 7682
 ```
 
-That warning is harmless and the sender keeps working, since it only needs the
-one live tunnel. But OpenSSH never retries a failed remote forward, so the tunnel
-belongs to whichever connection got there first, and closing that project takes
-`zed .` down in every other one until a new project reconnects.
+OpenSSH never retries a failed remote forward, so the tunnel belongs to whichever
+connection got there first, and closing that project takes `zed .` down in every
+other one until a new project reconnects.
 
-Pinning a stable `ControlPath` puts every connection to the host on one shared
-master, so there is a single forward, and `ControlPersist` keeps it up across
-individual projects opening and closing — including with no project open at all,
-since the listener is a Scheduled Task rather than part of a session.
+On Linux or macOS the fix is a shared control socket — pin `ControlPath`, set
+`ControlPersist`, and every connection to the host rides one master with a single
+forward. **Windows OpenSSH cannot do this.** Multiplexing needs a Unix-domain
+socket feature Win32-OpenSSH has never implemented
+([#1328](https://github.com/PowerShell/Win32-OpenSSH/issues/1328),
+[#405](https://github.com/PowerShell/Win32-OpenSSH/issues/405)), and it is out of
+that project's scope. Setting `ControlPath` there does not fall back to an
+unshared connection — it breaks every connection outright:
 
-Zed otherwise hardcodes `ControlMaster=yes` with a `ControlPath` under a random
-temp directory. These `args` win anyway: Zed appends them ahead of its own `-o`
-flags, and ssh takes the first value it is given for an option.
+```
+getsockname failed: Not a socket
+Read from remote host <dev box>: Unknown error
+```
 
-Do not add `-o ExitOnForwardFailure=yes`. With it, every connection after the
-first refuses to connect instead of warning.
+So the forward is given its own connection instead. `zed-open-tunnel` runs one
+`ssh -N -R`, restarts it with exponential backoff whenever it drops, and is
+governed by the same watchdog trigger as the listener. Nothing about the forward
+depends on Zed any more: it survives projects opening and closing, and stays up
+with no project open at all, so `zed .` on the dev box opens a fresh window rather
+than failing.
+
+The tunnel's ssh does carry `-o ExitOnForwardFailure=yes` — a connection without
+the forward is useless to it, and exiting hands the retry to the supervisor. That
+is the opposite of the right setting for Zed's own `args`, where it would make
+every connection after the first refuse to connect instead of warning.
 
 ## Security
 
