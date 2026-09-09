@@ -124,6 +124,11 @@ Write-Host ''
 
 $expectedForward = "{0}:127.0.0.1:{0}" -f $Port
 
+# Set by the Tunnel section and read by the remote check, which cannot tell on its
+# own whether the forward it sees on the dev box is ours or an abandoned one.
+# 'starting' is not evidence either way, so it must not be read as 'not ours'.
+$script:TunnelState = 'absent'   # absent | starting | bound
+
 # Read up front: what the Zed args should look like depends on whether the tunnel
 # task exists to own the forward, and that section prints further down.
 $tunnelTask = Get-ScheduledTask -TaskName $TunnelTaskName -ErrorAction SilentlyContinue
@@ -299,6 +304,9 @@ if ($tunnelTask) {
     $ours = @($forwarders | Where-Object { $_.CommandLine -match $signature })
     $ssh = @($ours | Where-Object { ((Get-Date) - $_.CreationDate).TotalSeconds -ge $EstablishedSeconds })
 
+    if ($ssh.Count -gt 0) { $script:TunnelState = 'bound' }
+    elseif ($ours.Count -gt 0) { $script:TunnelState = 'starting' }
+
     if ($ssh.Count -gt 0) {
         Test-Ok "ssh holding -R $expectedForward" "pid $($ssh[0].ProcessId)"
         if ($ssh.Count -gt 1) {
@@ -369,7 +377,19 @@ if ($CheckRemote) {
         $text = ($result | Out-String)
         if ($text -match 'SENDER_OK') { Test-Ok 'zed sender on remote PATH' } else { Test-Warn 'no zed sender on remote PATH' }
         if ($text -match 'TUNNEL_OK') {
-            Test-Ok "remote sshd is forwarding 127.0.0.1:$Port"
+            # Something listens there, which is not the same as it reaching here.
+            # A session abandoned when this machine slept holds the port open and
+            # accepts connections while the bytes go nowhere, so the sender
+            # reports success and no window ever appears.
+            if ($script:TunnelState -eq 'bound' -or -not $tunnelTask) {
+                Test-Ok "remote sshd is forwarding 127.0.0.1:$Port"
+            }
+            elseif ($script:TunnelState -eq 'starting') {
+                Test-Warn "cannot tell whose forward holds 127.0.0.1:$Port" 'the tunnel ssh is too young to have proven itself; re-run in a few seconds'
+            }
+            else {
+                Test-Bad "a stale forward holds 127.0.0.1:$Port" "it still accepts connections and drops them, so 'zed .' will look like it worked; see the README for how to clear it"
+            }
         }
         elseif ($tunnelTask) {
             Test-Bad "remote is not listening on 127.0.0.1:$Port" "'$TunnelTaskName' should keep it bound at all times"

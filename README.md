@@ -195,6 +195,51 @@ the forward is useless to it, and exiting hands the retry to the supervisor. Tha
 is the opposite of the right setting for Zed's own `args`, where it would make
 every connection after the first refuse to connect instead of warning.
 
+### Stale forwards after the workstation sleeps
+
+When the workstation sleeps, its end of the connection dies without the dev box
+noticing, and that sshd session goes on holding the port. The tunnel then cannot
+rebind, because OpenSSH never retries a remote forward, and the log fills with
+
+```
+Error: remote port forwarding failed for listen port 7682
+```
+
+This fails as a black hole rather than as an outage: the port still *accepts*
+connections on the dev box, so `zed .` prints `Opening ssh://…` and no window ever
+appears. `check-zed-remote-open.ps1 -CheckRemote` names the condition, and the
+tunnel log calls it out after a run of failures.
+
+The dev box reaps the abandoned session on its own once TCP keepalive gives up,
+which takes roughly two hours. To clear it now, find the session holding the port
+and kill it:
+
+```bash
+# on the dev box -- sessions with no pty and no command are abandoned -R forwards
+pgrep -u "$USER" -f '^sshd:' | while read -r pid; do
+  [ "$(tr -d '\0' < /proc/$pid/cmdline)" = "sshd: $USER" ] && ps -o pid=,lstart= -p "$pid"
+done
+```
+
+Kill the one whose start time matches no live `ssh.exe` on the workstation. Your
+Zed sessions and terminals are not candidates: they appear as `sshd: user@pts/N`
+or `sshd: user@notty` and the filter above skips them.
+
+The tunnel cannot do this for you. Identifying the holder exactly would mean
+mapping the listening socket's inode to a process, and sshd drops privileges,
+which leaves `/proc/<pid>/fd` readable only by root — `ss -p`, `lsof` and `fuser`
+are blocked by the same thing.
+
+Two settings would fix this properly, and both live in the dev box's
+`sshd_config`, so they need whoever administers it:
+
+- `ClientAliveInterval` makes sshd notice the dead peer in seconds instead of
+  hours.
+- `StreamLocalBindUnlink yes` would let the forward move to a Unix socket
+  (`-R /run/user/$UID/zed-open.sock:127.0.0.1:7682`), where a new tunnel unlinks
+  a stale socket and takes over. The client-side option of that name does not
+  cover remote forwards, so setting it here has no effect.
+
 ## Security
 
 The port is loopback-only, but anything running as your user can reach it, so

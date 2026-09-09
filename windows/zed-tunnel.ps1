@@ -17,6 +17,10 @@
     with no agent, or an unknown host key, fails the connection rather than
     prompting an invisible process for input.
 
+    A forward that keeps failing usually means a session abandoned when this
+    machine slept is still holding the port on the dev box. Nothing here can clear
+    that; see the README.
+
 .PARAMETER Port
     Loopback port to forward. Must match the listener and the sender.
 
@@ -55,7 +59,10 @@ param(
 
     [int]$StableSeconds = 60,
 
-    [int]$MaxStderrLines = 5
+    [int]$MaxStderrLines = 5,
+
+    # Consecutive forward failures before the log calls the port stale.
+    [int]$StaleForwardFailures = 3
 )
 
 Set-StrictMode -Version Latest
@@ -159,6 +166,7 @@ Write-Log "ssh: $sshPath"
 Write-Log "forward: -R $forward to '$RemoteHost'"
 
 $backoff = $MinBackoffSeconds
+$forwardFailures = 0
 try {
     while ($true) {
         $startedAt = Get-Date
@@ -175,9 +183,22 @@ try {
             # a later drop starts over at the short delay instead of inheriting the
             # backoff from whatever outage came before it.
             if ($uptime.TotalSeconds -ge $StableSeconds) { $backoff = $MinBackoffSeconds }
+
+            if ($result.Stderr -match 'remote port forwarding failed') { $forwardFailures++ }
+            else { $forwardFailures = 0 }
         }
         catch {
             Write-Log "could not start ssh -- $($_.Exception.Message)" 'ERROR'
+        }
+
+        # One failure is ordinary -- a connection this tunnel just lost can still be
+        # shutting down on the far end. A run of them means a session abandoned when
+        # this machine slept is still holding the port, which nothing here can
+        # clear: the holder cannot even be identified without root on the dev box.
+        # Said once per run of failures so the log names the condition without
+        # repeating it on every retry.
+        if ($forwardFailures -eq $StaleForwardFailures) {
+            Write-Log "the port on '$RemoteHost' is held by an abandoned session; 'zed .' there will report success and open nothing until it is cleared (see the README)" 'ERROR'
         }
 
         Write-Log "reconnecting in ${backoff}s"
