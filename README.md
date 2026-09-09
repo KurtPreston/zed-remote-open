@@ -135,6 +135,32 @@ through the listener, or `-CheckRemote` for a read-only SSH check of the dev box
 %LOCALAPPDATA%\zed-listener\zed-tunnel.log
 ```
 
+### Keeping projects in one window
+
+`zed .` in a second directory adds that project to the window you already have
+rather than opening another one, and the two share a single SSH connection.
+
+Zed's CLI has no one invocation that does this. With no flag it activates a
+project that is already open but opens a new window for anything else, because
+`open_remote_project` ignores the sidebar preference that the local path honours.
+`--reuse` names a target window but switches the already-open check off, and
+re-opening a live project that way restarts its remote server underneath the
+running workspace and leaves the worktree broken.
+
+So the listener picks between the two and remembers what it has opened, in
+`open-projects.txt` beside the logs. Every uncertain case resolves to no flag,
+because a stray window is cheaper than a corrupted project. A path inside a
+project it opened, a path carrying a line number, and a path whose last segment
+matches the title of an open window all count as already open. The list resets
+whenever a request arrives with no Zed window running, since a Zed the CLI starts
+opens only the path it was given and never restores the previous session.
+
+What it cannot see is a project you opened through Zed's own UI, unless that
+project happens to be the active one in some window. Open one of those from the
+dev box while a different project is in front and it is added a second time;
+close the duplicate and open it again to clear that up. Teaching Zed to put
+remote projects in the sidebar itself would retire all of this.
+
 ### Zed configuration
 
 The workstation's `settings.json` only needs the host alias:
@@ -158,16 +184,20 @@ claimant just loses the race and retries.
 ### Why a separate tunnel task
 
 The forward used to ride Zed's own connections through `args`, since Zed's native
-`port_forwards` setting only ever emits `-L`. That works with one project open and
-degrades from there: only the first connection's forward succeeds and the rest log
+`port_forwards` setting only ever emits `-L`. Zed pools one SSH master per host, so
+a second project does not open a second master — but the master is not the only
+connection Zed makes. Because it cannot multiplex on Windows, every other
+invocation is its own `ssh` process carrying the same `args`: each project's
+`zed-remote-server` proxy, every terminal, every task. Each one re-attempts the
+forward, and every attempt after the first logs
 
 ```
 Warning: remote port forwarding failed for listen port 7682
 ```
 
 OpenSSH never retries a failed remote forward, so the tunnel belongs to whichever
-connection got there first, and closing that project takes `zed .` down in every
-other one until a new project reconnects.
+connection got there first — often a terminal rather than a project — and closing
+that one takes `zed .` down until some later connection happens to reclaim the port.
 
 On Linux or macOS the fix is a shared control socket — pin `ControlPath`, set
 `ControlPersist`, and every connection to the host rides one master with a single
@@ -193,7 +223,8 @@ than failing.
 The tunnel's ssh does carry `-o ExitOnForwardFailure=yes` — a connection without
 the forward is useless to it, and exiting hands the retry to the supervisor. That
 is the opposite of the right setting for Zed's own `args`, where it would make
-every connection after the first refuse to connect instead of warning.
+every connection after the first — including every terminal you open — refuse to
+connect instead of warning.
 
 ### Stale forwards after the workstation sleeps
 

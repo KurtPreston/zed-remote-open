@@ -54,6 +54,11 @@ zed <url>
 
 Zed parses the `:line:col` suffix itself; the listener must not split it off.
 
+A listener may add flags of its own to decide which window the project lands in —
+the Windows one passes `--reuse` to keep projects together. Those are literals it
+chooses for itself: the URL is still one argv entry, and nothing in a request can
+become a flag.
+
 ## Requirements on the listener
 
 Anything running as the workstation user can reach the port, so a request is
