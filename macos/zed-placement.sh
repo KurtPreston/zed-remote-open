@@ -12,11 +12,11 @@
 # remote server underneath the running workspace and leaves the worktree broken.
 #
 # So we pick between them. Every uncertain case resolves to no flag: a stray
-# window is cheaper than a corrupted project. Unlike the Windows listener, which
-# has to guess from window titles because those are all it can read, macOS asks
-# Zed's own workspace database which remote projects are open in the running
-# session -- which also sees projects opened through Zed's own UI. The state file
-# is kept only as a fallback for when the database cannot be read.
+# window is cheaper than a corrupted project. The evidence is Zed's own workspace
+# database, which names the remote projects open in the running session --
+# including ones opened through Zed's own UI. The Windows listener reads the same
+# database through winsqlite3, since it has no sqlite3 command to call. The state
+# file is kept only as a fallback for when the database cannot be read.
 
 # Is a Zed GUI process alive? This gate has to come first and cannot be skipped:
 # Zed deliberately leaves session_id bound on the workspace rows after a quit or

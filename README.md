@@ -125,8 +125,9 @@ with no agent, or a host key not yet in `known_hosts`, fails the connection.
 ```
 
 Verifies the Zed CLI, the `ssh_connections` entry, both Scheduled Tasks, the
-tunnel, the loopback binding, and the logs. Add `-Probe` to push a real URL
-through the listener, or `-CheckRemote` for a read-only SSH check of the dev box.
+tunnel, the loopback binding, the placement inputs, and the logs. Add `-Probe` to
+push a real URL through the listener, or `-CheckRemote` for a read-only SSH check
+of the dev box.
 
 ### Logs
 
@@ -147,20 +148,38 @@ project that is already open but opens a new window for anything else, because
 re-opening a live project that way restarts its remote server underneath the
 running workspace and leaves the worktree broken.
 
-So the listener picks between the two and remembers what it has opened, in
-`open-projects.txt` beside the logs. Every uncertain case resolves to no flag,
-because a stray window is cheaper than a corrupted project. A path inside a
-project it opened, a path carrying a line number, and a path whose last segment
-matches the title of an open window all count as already open. The list resets
-whenever a request arrives with no Zed window running, since a Zed the CLI starts
+So the listener picks between the two, and asks Zed's own workspace database at
+`%LOCALAPPDATA%\Zed\db\0-stable\db.sqlite` which remote projects are open in the
+running session:
+
+```sql
+SELECT w.paths FROM workspaces w
+  JOIN remote_connections c ON c.id = w.remote_connection_id
+ WHERE c.kind = 'ssh' AND c.host = ?
+   AND w.session_id = (SELECT value FROM kv_store WHERE key = 'session_id');
+```
+
+Windows ships no `sqlite3` command, so this goes through `winsqlite3.dll` — in
+`System32` since Windows 10 1803 — by P/Invoke. The database is opened read-only
+through a `file:` URI, so a WAL database with Zed actively writing to it is read
+without writing anything back.
+
+That sees the projects you opened through Zed's own UI as well as the ones the
+listener opened. It gates on a live Zed process first, because Zed leaves
+`session_id` bound on a workspace after a quit or a crash so it can restore it
+next launch, and `kv_store.session_id` is not replaced until that launch — so the
+query alone would report a quit Zed's last projects as still open. A request
+carrying a line number, or a path equal to or inside an open project, resolves to
+no flag; anything else gets `--reuse`. Every uncertain case resolves to no flag,
+because a stray window is cheaper than a corrupted project.
+
+If the database cannot be read, placement falls back to `open-projects.txt` beside
+the logs, which records only what the listener itself opened. That list resets
+whenever a request arrives with no Zed process running, since a Zed the CLI starts
 opens only the path it was given and never restores the previous session.
 
-What it cannot see is a project you opened through Zed's own UI, unless that
-project happens to be the active one in some window. Open one of those from the
-dev box while a different project is in front and it is added a second time;
-close the duplicate and open it again to clear that up. Teaching Zed to put
-remote projects in the sidebar itself would retire all of this — see
-[Upstream](#upstream), which names the few lines that would do it.
+Teaching Zed to put remote projects in the sidebar itself would retire all of
+this — see [Upstream](#upstream), which names the few lines that would do it.
 
 `-e`/`--existing` is not the flag for this, despite being the documented one.
 It asks for the sidebar placement that remote opens ignore, so a project that is
@@ -366,10 +385,10 @@ passphrase prompt — key auth has to already be non-interactive.
 
 ### Keeping projects in one window
 
-The placement problem is the same as on Windows, and the flag it resolves to is
-the same, but macOS decides it from better evidence. Instead of reading window
-titles — which need a TCC grant a background agent cannot obtain — the handler
-asks Zed's own workspace database at
+The placement problem is the same as on Windows, and it is decided the same way,
+from the same evidence. Window titles were never an option here — reading them
+needs a TCC grant a background agent cannot obtain — so the handler asks Zed's own
+workspace database at
 `~/Library/Application Support/Zed/db/0-stable/db.sqlite` which remote projects
 are open in the running session:
 
@@ -380,15 +399,15 @@ SELECT w.paths FROM workspaces w
    AND w.session_id = (SELECT value FROM kv_store WHERE key = 'session_id');
 ```
 
-This sees projects opened through Zed's own UI too, which the Windows window-title
-heuristic misses. It gates on a live Zed process first (`pgrep`), because Zed
+This sees projects opened through Zed's own UI too, and not just the ones the
+handler opened. It gates on a live Zed process first (`pgrep`), because Zed
 leaves the `session_id` bound on a workspace after a quit or crash so it can
 restore next launch, and `kv_store.session_id` is not replaced until that launch
 — so the query alone would report a quit Zed's last projects as still open. A
 request carrying a line number, or a path equal to or inside an open project,
 resolves to no flag; anything else gets `--reuse`. If the database cannot be read,
-placement falls back to an `open-projects.txt` beside the state directory and
-lands at Windows-level behaviour.
+placement falls back to an `open-projects.txt` beside the state directory, which
+records only what the handler itself opened.
 
 macOS 15 added an "App Data" TCC prompt for reading another app's
 `~/Library/Application Support` folder, and a launchd agent cannot reliably show
@@ -441,8 +460,9 @@ already-open lookup now covers remote locations, which is why no flag reliably
 activates a project that is open. The other half is that `open_remote_project`
 reads `requesting_window` but never `add_dirs_to_sidebar`, so the sidebar
 preference still stops at local paths. Resolving the active window into
-`requesting_window` when that option is set, as the local path does, would end
-the listener's guessing on every platform.
+`requesting_window` when that option is set, as the local path does, would retire
+the two-flag dance on every platform, and with it both listeners' need to read
+Zed's own database to choose between the flags.
 
 ## Security
 

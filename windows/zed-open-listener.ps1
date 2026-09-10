@@ -21,10 +21,15 @@
 .PARAMETER LogFile
     Append log lines to this file in addition to stdout.
 
+.PARAMETER ZedDb
+    Zed's own workspace database, which names the remote projects open in the
+    running session and is the primary evidence for window placement. Defaults to
+    the 0-stable database under %LOCALAPPDATA%\Zed (or %APPDATA%\Zed if the install
+    landed there); pass this to point at another channel.
+
 .PARAMETER StateFile
-    Remembers which URLs this listener has opened, so a project that is already
-    open is focused rather than added to the window a second time. See the comment
-    on Resolve-Placement for why the listener has to track this itself.
+    The URLs this listener has opened, used for placement only when the workspace
+    database cannot be read. See the comment on Resolve-Placement.
 #>
 [CmdletBinding()]
 param(
@@ -34,6 +39,8 @@ param(
     [string]$ZedExe,
 
     [string]$LogFile,
+
+    [string]$ZedDb,
 
     [string]$StateFile = (Join-Path $env:LOCALAPPDATA 'zed-listener\open-projects.txt'),
 
@@ -48,6 +55,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'ZedLog.ps1')
+. (Join-Path $PSScriptRoot 'ZedPlacement.ps1')
 
 # Host, then an absolute POSIX path, then optional :line[:col]. The path charset
 # excludes ';', '&', '|', quotes and control characters, so a request cannot smuggle
@@ -55,57 +63,16 @@ $ErrorActionPreference = 'Stop'
 # the path so the line/column suffix is never ambiguous.
 $UrlPattern = '^ssh://[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9 ._+@~%/-]*(?::[0-9]{1,9}(?::[0-9]{1,9})?)?$'
 
-# One Zed process owns every window, so Process.MainWindowTitle only ever reports
-# one of them. Enumerating gives the active project of each window, which is the
-# only cheap evidence of a project someone opened through Zed's own UI.
-Add-Type -TypeDefinition @'
-using System;
-using System.Collections.Generic;
-using System.Runtime.InteropServices;
-using System.Text;
-
-public static class ZedWindows {
-    private delegate bool EnumProc(IntPtr window, IntPtr param);
-
-    [DllImport("user32.dll")]
-    private static extern bool EnumWindows(EnumProc callback, IntPtr param);
-    [DllImport("user32.dll")]
-    private static extern bool IsWindowVisible(IntPtr window);
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    private static extern int GetWindowTextW(IntPtr window, StringBuilder text, int count);
-    [DllImport("user32.dll")]
-    private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
-
-    public static List<string> Titles(uint[] processIds) {
-        List<string> titles = new List<string>();
-        EnumWindows(delegate(IntPtr window, IntPtr param) {
-            if (!IsWindowVisible(window)) { return true; }
-            uint processId;
-            GetWindowThreadProcessId(window, out processId);
-            if (Array.IndexOf(processIds, processId) < 0) { return true; }
-            StringBuilder text = new StringBuilder(512);
-            GetWindowTextW(window, text, text.Capacity);
-            if (text.Length > 0) { titles.Add(text.ToString()); }
-            return true;
-        }, IntPtr.Zero);
-        return titles;
-    }
-}
-'@
-
-function Get-ZedWindowTitle {
-    $procIds = @(
-        Get-Process -Name 'Zed' -ErrorAction SilentlyContinue |
-            Select-Object -ExpandProperty Id
-    )
-    if ($procIds.Count -eq 0) { return @() }
-    return @([ZedWindows]::Titles([uint32[]]$procIds))
-}
-
 function Get-UrlPath {
     param([Parameter(Mandatory)][string]$Url)
     # Host off the front, any :line[:col] off the back, leaving the dev box path.
     ($Url -replace '^ssh://[^/]+', '') -replace ':[0-9]+(?::[0-9]+)?$', ''
+}
+
+function Get-UrlHost {
+    param([Parameter(Mandatory)][string]$Url)
+    # ssh://<host>/... -> <host>, the alias Zed's ssh_connections knows it by.
+    ($Url -replace '^ssh://', '') -replace '/.*$', ''
 }
 
 # Zed's CLI cannot express "focus this project if it is open, otherwise put it in
@@ -117,41 +84,53 @@ function Get-UrlPath {
 # restarts its remote server underneath the running workspace and leaves the
 # worktree broken.
 #
-# So the listener picks between them, and every uncertain case resolves to no
-# flag: the cost of being wrong that way is a stray window, against a corrupted
-# project the other way.
+# So the listener picks between them, and asks Zed's own workspace database which
+# remote projects are open in the running session -- which sees the ones opened
+# through Zed's UI too, not just the ones it opened itself. `open-projects.txt` is
+# kept only as a fallback for when the database cannot be read. Every uncertain
+# case resolves to no flag: the cost of being wrong that way is a stray window,
+# against a corrupted project the other way.
+#
+# The `Reset` field rides along on the decision because one signal settles both:
+# see the comment on Save-OpenedUrl's -Reset.
 function Resolve-Placement {
     param(
         [Parameter(Mandatory)][string]$Url,
-        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$WindowTitles,
-        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$OpenedUrls
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$OpenedUrls,
+        [Parameter(Mandatory)][string]$Database
     )
 
-    if ($WindowTitles.Count -eq 0) {
-        return [pscustomobject]@{ Reuse = $false; Reason = 'no zed window to reuse' }
+    # First, and not reorderable: Zed leaves session_id bound on its workspace rows
+    # after a quit or a crash so it can restore them next launch, so with no
+    # process alive the query below would name a dead session's projects as open.
+    if (-not (Test-ZedRunning)) {
+        return [pscustomobject]@{ Reuse = $false; Reset = $true; Reason = 'no zed process to reuse' }
     }
 
     if ($Url -match ':[0-9]+(?::[0-9]+)?$') {
-        return [pscustomobject]@{ Reuse = $false; Reason = 'a line number means a file, not a project' }
+        return [pscustomobject]@{ Reuse = $false; Reset = $false; Reason = 'a line number means a file, not a project' }
     }
 
     $path = Get-UrlPath -Url $Url
-    foreach ($opened in $OpenedUrls) {
-        $openedPath = Get-UrlPath -Url $opened
-        if ($path -eq $openedPath) {
-            return [pscustomobject]@{ Reuse = $false; Reason = 'opened here already' }
+
+    try {
+        $open = @(Get-ZedDbOpenPath -Database $Database -RemoteHost (Get-UrlHost -Url $Url))
+        if (Test-PathIsOpen -Path $path -OpenPaths $open) {
+            return [pscustomobject]@{ Reuse = $false; Reset = $false; Reason = 'open in this session' }
         }
-        if ($openedPath -and $path.StartsWith($openedPath.TrimEnd('/') + '/', [StringComparison]::Ordinal)) {
-            return [pscustomobject]@{ Reuse = $false; Reason = "inside $openedPath, opened here already" }
-        }
+        return [pscustomobject]@{ Reuse = $true; Reset = $false; Reason = 'not open in this session' }
+    }
+    catch {
+        Write-Log "could not read the workspace database -- $($_.Exception.Message)" 'WARN'
     }
 
-    $leaf = ($path -split '/')[-1]
-    if ($leaf -and $WindowTitles -contains $leaf) {
-        return [pscustomobject]@{ Reuse = $false; Reason = "a window is titled '$leaf'" }
+    # Database unreadable: fall back to what the listener recorded itself, which
+    # sees only its own opens.
+    $recorded = @($OpenedUrls | ForEach-Object { Get-UrlPath -Url $_ })
+    if (Test-PathIsOpen -Path $path -OpenPaths $recorded) {
+        return [pscustomobject]@{ Reuse = $false; Reset = $false; Reason = 'opened here already (state fallback)' }
     }
-
-    return [pscustomobject]@{ Reuse = $true; Reason = 'not known to be open' }
+    return [pscustomobject]@{ Reuse = $true; Reset = $false; Reason = 'not known to be open (state fallback)' }
 }
 
 function Get-OpenedUrl {
@@ -305,6 +284,7 @@ catch {
 }
 
 $script:OpenedUrls = Get-OpenedUrl -Path $StateFile
+$dbPath = Resolve-ZedDbPath -Explicit $ZedDb
 
 $zedPath = $null
 try {
@@ -316,7 +296,9 @@ catch {
 }
 
 if ($PSVersionTable.PSVersion.Major -lt 6) {
-    Write-Log 'requires PowerShell 7+ (ProcessStartInfo.ArgumentList is unavailable on 5.1)' 'FATAL'
+    # ArgumentList is unavailable on 5.1, and so is the UTF-8 string marshalling
+    # the winsqlite3 imports in ZedPlacement.ps1 need.
+    Write-Log 'requires PowerShell 7+' 'FATAL'
     exit 1
 }
 
@@ -331,7 +313,8 @@ catch {
 
 Write-Log "listening on 127.0.0.1:$Port (pid $PID)"
 Write-Log "zed cli: $zedPath"
-Write-Log "state  : $StateFile ($($script:OpenedUrls.Count) open)"
+Write-Log "zed db : $dbPath"
+Write-Log "state  : $StateFile ($($script:OpenedUrls.Count) open, fallback only)"
 
 try {
     while ($true) {
@@ -370,12 +353,11 @@ try {
 
             Write-Log "opening $url"
 
-            $titles = @(Get-ZedWindowTitle)
-            $placement = Resolve-Placement -Url $url -WindowTitles $titles -OpenedUrls $script:OpenedUrls
+            $placement = Resolve-Placement -Url $url -OpenedUrls $script:OpenedUrls -Database $dbPath
             Write-Log "$(if ($placement.Reuse) { 'adding to the open window' } else { 'opening as-is' }) -- $($placement.Reason)"
 
             Invoke-ZedOpen -Url $url -Exe $zedPath -WaitSeconds $LaunchWaitSeconds -Reuse:$placement.Reuse
-            Save-OpenedUrl -Url $url -Reset:($titles.Count -eq 0)
+            Save-OpenedUrl -Url $url -Reset:$placement.Reset
         }
         catch {
             # One bad request must never take down the loop.

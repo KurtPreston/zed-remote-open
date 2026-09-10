@@ -55,8 +55,13 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'ZedCli.ps1')
 
 $LogName = 'ZedLog.ps1'
+$PlacementName = 'ZedPlacement.ps1'
 $ListenerName = 'zed-open-listener.ps1'
 $TunnelName = 'zed-tunnel.ps1'
+
+# Everything the tasks need beside them in InstallDir; the listener dot-sources
+# the first two from its own directory.
+$ScriptNames = @($LogName, $PlacementName, $ListenerName, $TunnelName)
 
 $LogPath = Join-Path $InstallDir $LogName
 $ListenerPath = Join-Path $InstallDir $ListenerName
@@ -282,7 +287,7 @@ if (-not $NoTunnel) {
     Write-Detail "ssh     : $sshPath"
 }
 
-foreach ($name in @($LogName, $ListenerName, $TunnelName)) {
+foreach ($name in $ScriptNames) {
     if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot $name) -PathType Leaf)) {
         throw "$name not found next to the installer"
     }
@@ -294,7 +299,7 @@ if (-not $NoTunnel) { Stop-Component -Name $TunnelTaskName -Pattern $TunnelMatch
 
 Write-Step "installing to $InstallDir"
 New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-foreach ($name in @($LogName, $ListenerName, $TunnelName)) {
+foreach ($name in $ScriptNames) {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $InstallDir $name) -Force
     Write-Detail "copied $name"
 }

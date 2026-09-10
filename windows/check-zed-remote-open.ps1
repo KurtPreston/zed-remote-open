@@ -4,8 +4,8 @@
 
 .DESCRIPTION
     Verifies the Zed CLI, the ssh_connections entry, both Scheduled Tasks, the
-    reverse tunnel, the loopback listener, and the logs. Nothing here changes state
-    unless you pass -Probe.
+    reverse tunnel, the loopback listener, the placement inputs, and the logs.
+    Nothing here changes state unless you pass -Probe.
 
     What it expects of Zed's args depends on which task is installed: with the
     tunnel task registered the forward belongs to it, and an -R left in Zed's args
@@ -20,6 +20,10 @@
 .PARAMETER CheckRemote
     Read-only SSH check that the dev box is listening on the tunnel port and has
     a zed sender on PATH. Requires an ssh client and a working host alias.
+
+.PARAMETER ZedDb
+    Zed's workspace database, the listener's primary evidence for window
+    placement. Defaults to the same one the listener resolves.
 #>
 [CmdletBinding()]
 param(
@@ -36,6 +40,8 @@ param(
 
     [string]$TunnelTaskName = 'zed-open-tunnel',
 
+    [string]$ZedDb,
+
     [switch]$Probe,
 
     [switch]$CheckRemote,
@@ -48,6 +54,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'ZedCli.ps1')
+. (Join-Path $PSScriptRoot 'ZedPlacement.ps1')
 
 $script:Failures = 0
 $script:Warnings = 0
@@ -327,7 +334,37 @@ if ($tunnelTask) {
     }
 }
 
-# --- 6. Logs ----------------------------------------------------------------
+# --- 6. Placement inputs ----------------------------------------------------
+# The two things the listener decides no-flag vs --reuse from: a live Zed process,
+# and what that Zed's workspace database says is open for this host.
+Write-Host ''
+Write-Host 'Placement'
+$dbPath = Resolve-ZedDbPath -Explicit $ZedDb
+$stateFile = Join-Path $InstallDir 'open-projects.txt'
+if (Test-ZedRunning) {
+    Test-Ok 'a Zed process is running'
+}
+else {
+    Test-Warn 'no Zed process running' "placement resets $stateFile on the next request"
+}
+try {
+    $sessionId = Get-ZedDbSessionId -Database $dbPath
+    Test-Ok 'workspace database readable' "$dbPath (session $(if ($sessionId) { $sessionId } else { 'unset' }))"
+
+    $openPaths = @(Get-ZedDbOpenPath -Database $dbPath -RemoteHost $RemoteHost)
+    if ($openPaths.Count -gt 0) {
+        Test-Ok "open remote workspaces for '$RemoteHost' this session"
+        $openPaths | ForEach-Object { Write-Host "         | $_" -ForegroundColor DarkGray }
+    }
+    else {
+        Test-Ok "no remote workspaces open for '$RemoteHost' this session" "the next 'zed .' opens with --reuse"
+    }
+}
+catch {
+    Test-Warn 'workspace database not readable' "$($_.Exception.Message) -- placement falls back to $stateFile, which sees only what the listener opened itself"
+}
+
+# --- 7. Logs ----------------------------------------------------------------
 function Show-Log {
     param(
         [Parameter(Mandatory)][string]$Label,
@@ -348,7 +385,7 @@ Write-Host 'Logs'
 Show-Log -Label 'listener log' -Path (Join-Path $InstallDir 'zed-listener.log')
 if ($tunnelTask) { Show-Log -Label 'tunnel log' -Path (Join-Path $InstallDir 'zed-tunnel.log') }
 
-# --- 7. Optional probe ------------------------------------------------------
+# --- 8. Optional probe ------------------------------------------------------
 if ($Probe) {
     Write-Host ''
     Write-Host 'Probe (opens a Zed window)'
@@ -364,7 +401,7 @@ if ($Probe) {
     }
 }
 
-# --- 8. Optional remote check ----------------------------------------------
+# --- 9. Optional remote check ----------------------------------------------
 if ($CheckRemote) {
     Write-Host ''
     Write-Host "Remote ($RemoteHost)"
