@@ -30,7 +30,7 @@ workstation platform gets its own listener.
 | --- | --- |
 | Dev box sender | `remote/` — bash sender + symlink installer |
 | Windows listener | `windows/` — PowerShell listener + tunnel supervisor + Scheduled Task installer |
-| macOS listener | not yet |
+| macOS listener | `macos/` — bash handler + tunnel supervisor + launchd installer |
 | Linux listener | not yet |
 
 ## Dev box
@@ -159,7 +159,13 @@ What it cannot see is a project you opened through Zed's own UI, unless that
 project happens to be the active one in some window. Open one of those from the
 dev box while a different project is in front and it is added a second time;
 close the duplicate and open it again to clear that up. Teaching Zed to put
-remote projects in the sidebar itself would retire all of this.
+remote projects in the sidebar itself would retire all of this — see
+[Upstream](#upstream), which names the few lines that would do it.
+
+`-e`/`--existing` is not the flag for this, despite being the documented one.
+It asks for the sidebar placement that remote opens ignore, so a project that is
+not already open still gets its own window. `--reuse` is hidden from `--help`
+but is the only one that names a window.
 
 ### Zed configuration
 
@@ -270,6 +276,173 @@ Two settings would fix this properly, and both live in the dev box's
   (`-R /run/user/$UID/zed-open.sock:127.0.0.1:7682`), where a new tunnel unlinks
   a stale socket and takes over. The client-side option of that name does not
   cover remote forwards, so setting it here has no effect.
+
+## Workstation (macOS)
+
+The macOS side does the same two jobs as the Windows side — serve the loopback
+port and keep the reverse tunnel up — but the shapes are native to the platform,
+so read this rather than translating the Windows section.
+
+### Install
+
+```bash
+cd macos
+./install-zed-listener.sh --remote-host desktop
+```
+
+This resolves the Zed CLI and `ssh`, writes two launchd agents into
+`~/Library/LaunchAgents`, and loads them. Pass `--remote-host` if your dev box is
+not the default `desktop`; it has to be the same alias Zed and `ZED_SSH_HOST` use.
+
+Re-running is idempotent. To remove everything:
+
+```bash
+./install-zed-listener.sh --uninstall
+```
+
+Useful switches: `--port`, `--remote-host`, `--zed-bin`, `--ssh-bin`,
+`--no-tunnel`, `--no-start`, `--uninstall`.
+
+The scripts run from this checkout rather than being copied, like the dev-box
+sender, so a `git pull` here updates the install — leave the checkout where it is.
+Only the Zed CLI and `ssh` paths are resolved at install time and baked into the
+agents, because a launchd agent starts with a minimal PATH. The CLI is used from
+inside its `.app` bundle and never copied out: it finds its own app by walking up
+from its executable, so a copy elsewhere launches nothing.
+
+| Agent | Does |
+| --- | --- |
+| `zed-remote-open.listener` | serves `127.0.0.1:7682` and hands each URL to the local Zed |
+| `zed-remote-open.tunnel` | keeps `ssh -N -R 7682:127.0.0.1:7682 desktop` up |
+
+### Two launchd agents, not two loops
+
+The listener is socket-activated. Its plist carries `inetdCompatibility` with
+`Wait: false` and a `Sockets` entry, so **launchd** binds `127.0.0.1:7682` and
+hands each accepted connection to a fresh copy of `zed-open-handler.sh` on stdio.
+The port is therefore bound from load onward whether or not Zed is running —
+the property the Windows install gets from a watchdog Scheduled Task — and
+because every request is its own short-lived process, a malformed URL, a slow
+sender, or a crash takes down only that one process. "A bad request must never
+stop the service" is structural here, not a `try`/`catch`. The `launchd.plist(5)`
+manual calls `inetdCompatibility` legacy, but its replacement,
+`launch_activate_socket(3)`, is a C API no shell can reach.
+
+The tunnel is a plain `RunAtLoad` + `KeepAlive` agent whose own loop supervises
+one `ssh -N -R`, with the same backoff and stale-forward reporting as the Windows
+one. It owns the forward for the same reason: so it survives projects opening and
+closing, and stays up with no project open at all. Its shutdown is signal-driven
+— the backoff sleep is interruptible so a `launchctl bootout` does not wait out
+the delay, and a trap kills the ssh child so the forward never outlives the
+supervisor and strands the port on the dev box.
+
+Everything in [Why a separate tunnel task](#why-a-separate-tunnel-task) and
+[Stale forwards after the workstation sleeps](#stale-forwards-after-the-workstation-sleeps)
+applies unchanged; `check-zed-remote-open.sh --check-remote` names the stale
+condition, as its PowerShell sibling does. Unlike Windows OpenSSH, macOS `ssh`
+*can* multiplex, so pinning `ControlPath` and `ControlPersist` on the host would
+also work — but a dedicated tunnel agent is simpler to supervise and does not
+depend on Zed making any connection at all, so this uses one anyway.
+
+### Check
+
+```bash
+./check-zed-remote-open.sh
+```
+
+Verifies the Zed CLI, the `ssh_connections` entry, both agents, the loopback
+binding, the tunnel, the logs, and the placement inputs. Add `--probe` to push a
+real URL through the listener, or `--check-remote` for a read-only SSH check of
+the dev box. It also confirms `ssh -o BatchMode=yes <host> true` works, because a
+launchd agent inherits the GUI session's `SSH_AUTH_SOCK` and cannot answer a
+passphrase prompt — key auth has to already be non-interactive.
+
+### Logs
+
+```
+~/Library/Logs/zed-listener/zed-listener.log
+~/Library/Logs/zed-listener/zed-tunnel.log
+```
+
+### Keeping projects in one window
+
+The placement problem is the same as on Windows, and the flag it resolves to is
+the same, but macOS decides it from better evidence. Instead of reading window
+titles — which need a TCC grant a background agent cannot obtain — the handler
+asks Zed's own workspace database at
+`~/Library/Application Support/Zed/db/0-stable/db.sqlite` which remote projects
+are open in the running session:
+
+```sql
+SELECT w.paths FROM workspaces w
+  JOIN remote_connections c ON c.id = w.remote_connection_id
+ WHERE c.kind = 'ssh' AND c.host = '<host>'
+   AND w.session_id = (SELECT value FROM kv_store WHERE key = 'session_id');
+```
+
+This sees projects opened through Zed's own UI too, which the Windows window-title
+heuristic misses. It gates on a live Zed process first (`pgrep`), because Zed
+leaves the `session_id` bound on a workspace after a quit or crash so it can
+restore next launch, and `kv_store.session_id` is not replaced until that launch
+— so the query alone would report a quit Zed's last projects as still open. A
+request carrying a line number, or a path equal to or inside an open project,
+resolves to no flag; anything else gets `--reuse`. If the database cannot be read,
+placement falls back to an `open-projects.txt` beside the state directory and
+lands at Windows-level behaviour.
+
+macOS 15 added an "App Data" TCC prompt for reading another app's
+`~/Library/Application Support` folder, and a launchd agent cannot reliably show
+it. On the machine this was built against (macOS 26) a `/bin/bash` agent read the
+database with no prompt and no error, so the database path is the default; the
+state-file fallback is there for any setup where that grant is withheld.
+
+### Zed configuration
+
+The same as [Zed configuration](#zed-configuration) for Windows: the
+workstation's `~/.config/zed/settings.json` needs the host alias in
+`ssh_connections`, and must **not** carry the `-R 7682:127.0.0.1:7682` forward in
+`args`, because the `zed-remote-open.tunnel` agent owns it and the two would race
+for the same remote port.
+
+## Upstream
+
+Zed wants a remote-side CLI and nobody there is building one, so this repo has no
+scheduled end. A maintainer in
+[#32214](https://github.com/zed-industries/zed/discussions/32214) sketched the
+design they would take — inject an alias into Zed's own terminal sessions so
+`zed` reaches the `zed-remote-server` process that owns the project, and define
+message passing over it — and called it something they had wanted for a while
+that needed infrastructure work first. The tracking issue is
+[#56057](https://github.com/zed-industries/zed/issues/56057), never-stale and
+labelled `platform:remote`; the feature request is
+[#33601](https://github.com/zed-industries/zed/discussions/33601).
+
+Two contributors have built it. [#40484](https://github.com/zed-industries/zed/pull/40484)
+drew a full design review and an offer of help from Zed's own people before its
+author ran out of time, and it closed unmerged.
+[#50250](https://github.com/zed-industries/zed/pull/50250) implements the
+suggested design — `remote_server` gains a `cli` mode, a Unix socket per session,
+an `OpenPathOnClient` RPC over the SSH channel already there, a shim on `PATH`
+inside remote terminals — and has sat open since February 2026 with no maintainer
+review and two people offering to take it over. Receptiveness is not the
+bottleneck; review attention is.
+
+The review on #40484 is where the constraints live, and they are worth reading
+before anyone writes a third attempt: one shim for every connection rather than
+one each, identified by an environment variable the terminal's activation script
+sets; the existing data-directory helper rather than a hand-built path; no
+`ssh://` URLs from the remote side, since remoting transitively is meaningless;
+and the server parsing and opening the path rather than handing a remote-only
+path to the client to resolve.
+
+The window placement above is a smaller and separate gap. Zed staff landed half
+of it in [#49307](https://github.com/zed-industries/zed/pull/49307): the
+already-open lookup now covers remote locations, which is why no flag reliably
+activates a project that is open. The other half is that `open_remote_project`
+reads `requesting_window` but never `add_dirs_to_sidebar`, so the sidebar
+preference still stops at local paths. Resolving the active window into
+`requesting_window` when that option is set, as the local path does, would end
+the listener's guessing on every platform.
 
 ## Security
 
