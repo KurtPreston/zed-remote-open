@@ -66,13 +66,38 @@ $UrlPattern = '^ssh://[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9 ._+@~%/-]*(?::[0-9]{
 function Get-UrlPath {
     param([Parameter(Mandatory)][string]$Url)
     # Host off the front, any :line[:col] off the back, leaving the dev box path.
-    ($Url -replace '^ssh://[^/]+', '') -replace ':[0-9]+(?::[0-9]+)?$', ''
+    # The directory marker comes off as well, because this is compared against the
+    # roots Zed stores unslashed in its workspace database. '/' keeps its slash,
+    # being the whole path rather than a marker.
+    $path = ($Url -replace '^ssh://[^/]+', '') -replace ':[0-9]+(?::[0-9]+)?$', ''
+    if ($path -eq '/') { return $path }
+    return $path -replace '/$', ''
 }
 
 function Get-UrlHost {
     param([Parameter(Mandatory)][string]$Url)
     # ssh://<host>/... -> <host>, the alias Zed's ssh_connections knows it by.
     ($Url -replace '^ssh://', '') -replace '/.*$', ''
+}
+
+function Test-UrlIsDirectory {
+    param([Parameter(Mandatory)][string]$Url)
+    # A trailing slash means the sender stat'd a directory; without one the request
+    # names a file. Only the sender can tell, since the path is on the dev box, so
+    # it says which -- see docs/PROTOCOL.md. An unmarked path reads as a file,
+    # which is the safe way round for a sender too old to mark anything.
+    return ($Url -replace '^ssh://[^/]+', '').EndsWith('/')
+}
+
+function Get-CliUrl {
+    param([Parameter(Mandatory)][string]$Url)
+    # The URL as Zed should receive it, with the directory marker taken back off:
+    # it was addressed to the listener, and Zed's database has to go on storing
+    # roots unslashed for Get-UrlPath's comparison to keep matching. '/' is the one
+    # path whose trailing slash is the path itself, and stripping it would leave a
+    # URL with no path at all.
+    if (($Url -replace '^ssh://[^/]+', '') -eq '/') { return $Url }
+    return $Url -replace '/$', ''
 }
 
 # Zed's CLI cannot express "focus this project if it is open, otherwise put it in
@@ -91,6 +116,10 @@ function Get-UrlHost {
 # case resolves to no flag: the cost of being wrong that way is a stray window,
 # against a corrupted project the other way.
 #
+# All of that is about directories. A file is never a project and never takes
+# `--reuse`, so the only question it raises is answered by the marker the sender
+# puts on the path.
+#
 # The `Reset` field rides along on the decision because one signal settles both:
 # see the comment on Save-OpenedUrl's -Reset.
 function Resolve-Placement {
@@ -107,8 +136,12 @@ function Resolve-Placement {
         return [pscustomobject]@{ Reuse = $false; Reset = $true; Reason = 'no zed process to reuse' }
     }
 
-    if ($Url -match ':[0-9]+(?::[0-9]+)?$') {
-        return [pscustomobject]@{ Reuse = $false; Reset = $false; Reason = 'a line number means a file, not a project' }
+    # --reuse is for directories alone. It turns off the already-open check, which
+    # is what a second project wants and the ruin of a file: Zed then builds a
+    # workspace whose only root is that one file and shows it where the project the
+    # file belongs to was.
+    if (-not (Test-UrlIsDirectory -Url $Url)) {
+        return [pscustomobject]@{ Reuse = $false; Reset = $false; Reason = 'a file opens in the project that holds it' }
     }
 
     $path = Get-UrlPath -Url $Url
@@ -356,8 +389,13 @@ try {
             $placement = Resolve-Placement -Url $url -OpenedUrls $script:OpenedUrls -Database $dbPath
             Write-Log "$(if ($placement.Reuse) { 'adding to the open window' } else { 'opening as-is' }) -- $($placement.Reason)"
 
-            Invoke-ZedOpen -Url $url -Exe $zedPath -WaitSeconds $LaunchWaitSeconds -Reuse:$placement.Reuse
-            Save-OpenedUrl -Url $url -Reset:$placement.Reset
+            # The directory marker is read above and goes no further: Zed has to
+            # keep storing project roots unslashed for the placement query to find
+            # them again.
+            $cliUrl = Get-CliUrl -Url $url
+
+            Invoke-ZedOpen -Url $cliUrl -Exe $zedPath -WaitSeconds $LaunchWaitSeconds -Reuse:$placement.Reuse
+            Save-OpenedUrl -Url $cliUrl -Reset:$placement.Reset
         }
         catch {
             # One bad request must never take down the loop.
