@@ -106,12 +106,16 @@ fi
 
 # The URL is one argv entry with no shell and no interpolation, so spaces and
 # metacharacters cannot split it. --reuse, when used, is a literal chosen here.
-# stdin is closed off the socket so the CLI never reads from it.
+# stdin is closed off the socket so the CLI never reads from it. The directory
+# marker comes off first: it was addressed to us, and Zed has to go on storing
+# project roots unslashed for the placement query to keep finding them.
+cli_url=$(zed_url_for_cli "$url")
+
 args=()
 if [[ $decision == reuse ]]; then
     args+=(--reuse)
 fi
-args+=("$url")
+args+=("$cli_url")
 
 "$zed_bin" "${args[@]}" </dev/null
 launch_rc=$?
@@ -126,5 +130,5 @@ else
     zed_log ERROR "zed cli exited $launch_rc"
 fi
 
-zed_state_record "$url" "$reset"
+zed_state_record "$cli_url" "$reset"
 exit 0

@@ -17,6 +17,10 @@
 # including ones opened through Zed's own UI. The Windows listener reads the same
 # database through winsqlite3, since it has no sqlite3 command to call. The state
 # file is kept only as a fallback for when the database cannot be read.
+#
+# All of that is about directories. A file is never a project and never takes
+# --reuse, so the only question it raises is answered by the marker the sender
+# puts on the path.
 
 # Is a Zed GUI process alive? This gate has to come first and cannot be skipped:
 # Zed deliberately leaves session_id bound on the workspace rows after a quit or
@@ -86,13 +90,20 @@ zed_path_is_open() {
 zed_resolve_placement() {
     local url=$1
 
-    if zed_url_has_position "$url"; then
-        printf 'noflag\tno\ta line number means a file, not a project\n'
+    # First, and not reorderable: with nothing alive the CLI cold-starts a Zed,
+    # which opens only the path it was given and restores no previous session, so
+    # whatever the state file remembers is stale whichever kind of path this is.
+    if ! zed_is_running; then
+        printf 'noflag\tyes\tno zed process to reuse\n'
         return
     fi
 
-    if ! zed_is_running; then
-        printf 'noflag\tyes\tno zed process to reuse\n'
+    # --reuse is for directories alone. It turns off the search for a project
+    # already holding the path, which is what a second project wants and the
+    # ruin of a file: Zed then builds a workspace whose only root is that one
+    # file and shows it where the project the file belongs to was.
+    if ! zed_url_is_directory "$url"; then
+        printf 'noflag\tno\ta file opens in the project that holds it\n'
         return
     fi
 

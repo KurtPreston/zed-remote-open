@@ -127,13 +127,40 @@ zed_url_host() {
 }
 
 zed_url_path() {
-    # ssh://<host><abs-path>[:line[:col]] -> <abs-path>, host and suffix removed.
+    # ssh://<host><abs-path>[/][:line[:col]] -> <abs-path>, with the host, the
+    # position and the directory marker all removed. The marker goes because Zed
+    # stores project roots unslashed in its workspace database, and placement
+    # compares this against those roots. '/' keeps its slash, being the whole
+    # path rather than a marker.
     local rest=${1#ssh://}
     local path=/${rest#*/}
-    printf '%s' "$path" | sed -E 's/:[0-9]+(:[0-9]+)?$//'
+    path=$(printf '%s' "$path" | sed -E 's/:[0-9]+(:[0-9]+)?$//')
+    if [[ $path != / ]]; then
+        path=${path%/}
+    fi
+    printf '%s' "$path"
 }
 
-zed_url_has_position() {
-    # A trailing :line[:col] means the request names a file, not a project.
-    [[ $1 =~ :[0-9]+(:[0-9]+)?$ ]]
+zed_url_is_directory() {
+    # A trailing slash means the sender stat'd a directory; without one the
+    # request names a file. Only the sender can tell, so it says which -- see
+    # docs/PROTOCOL.md. An unmarked path reads as a file, which is the safe way
+    # round for a sender too old to mark anything.
+    local rest=${1#ssh://}
+    [[ /${rest#*/} == */ ]]
+}
+
+zed_url_for_cli() {
+    # The URL as Zed should receive it, with the directory marker taken back off:
+    # it is ours to read, and Zed's database has to keep storing roots unslashed
+    # for the comparison in zed_url_path to keep matching.
+    local url=$1
+    local rest=${url#ssh://}
+    # '/' is the one path whose trailing slash is the path itself, and stripping
+    # it would leave a URL with no path at all.
+    if [[ /${rest#*/} == / || $url != */ ]]; then
+        printf '%s' "$url"
+    else
+        printf '%s' "${url%/}"
+    fi
 }
