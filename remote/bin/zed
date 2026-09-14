@@ -59,7 +59,21 @@ if [[ ! -e $path ]]; then
 fi
 
 port="${ZED_OPEN_PORT:-7682}"
-url="ssh://${ZED_SSH_HOST}$(realpath "$path")${suffix}"
+resolved=$(realpath "$path")
+
+# Say whether this is a directory or a file, because the listener cannot work it
+# out: the path is on this box, so only we can stat it, and the two want opposite
+# window placement. A trailing slash means a directory; see docs/PROTOCOL.md.
+# realpath adds no trailing slash of its own, except on '/', which already ends
+# in the one it needs.
+if [[ -d $resolved ]]; then
+    # A line and column name a place in a file, so a directory carries neither
+    # even when the argument looked like 'src:42'.
+    suffix=""
+    [[ $resolved == / ]] || resolved="$resolved/"
+fi
+
+url="ssh://${ZED_SSH_HOST}${resolved}${suffix}"
 
 # /dev/tcp keeps this free of netcat, whose -N/-q0 flags differ between builds.
 # The braces put bash's own "connection refused" on the suppressed stderr.
