@@ -58,10 +58,13 @@ $LogName = 'ZedLog.ps1'
 $PlacementName = 'ZedPlacement.ps1'
 $ListenerName = 'zed-open-listener.ps1'
 $TunnelName = 'zed-tunnel.ps1'
+$CleanupName = 'clear-stale-forwards'
 
 # Everything the tasks need beside them in InstallDir; the listener dot-sources
-# the first two from its own directory.
+# the first two from its own directory. The cleanup script is piped to the dev
+# box over ssh when a stale forward is detected.
 $ScriptNames = @($LogName, $PlacementName, $ListenerName, $TunnelName)
+$CleanupSource = Join-Path (Split-Path $PSScriptRoot -Parent) "remote\bin\$CleanupName"
 
 $LogPath = Join-Path $InstallDir $LogName
 $ListenerPath = Join-Path $InstallDir $ListenerName
@@ -292,6 +295,9 @@ foreach ($name in $ScriptNames) {
         throw "$name not found next to the installer"
     }
 }
+if (-not (Test-Path -LiteralPath $CleanupSource -PathType Leaf)) {
+    throw "$CleanupName not found at $CleanupSource"
+}
 
 Write-Step 'stopping any running instance'
 Stop-Component -Name $TaskName -Pattern $ListenerMatch
@@ -303,6 +309,8 @@ foreach ($name in $ScriptNames) {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $InstallDir $name) -Force
     Write-Detail "copied $name"
 }
+Copy-Item -LiteralPath $CleanupSource -Destination (Join-Path $InstallDir $CleanupName) -Force
+Write-Detail "copied $CleanupName"
 
 $listenerArgs = '-NoLogo -NoProfile -File "{0}" -Port {1} -ZedExe "{2}" -LogFile "{3}"' -f
     $ListenerPath, $Port, $zedPath, $LogFile

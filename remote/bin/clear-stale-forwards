@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+
+# Reclaim a reverse-SSH listen port held by abandoned sshd sessions.
+#
+# When a workstation sleeps, its ssh client dies without the dev box noticing,
+# and the session keeps binding the -R forward port. New tunnels then fail with
+# "remote port forwarding failed" while the port still accepts connections, so
+# `zed .` reports success and opens nothing.
+#
+# Only processes whose cmdline is exactly "sshd: $USER" are candidates. Zed
+# remote sessions and terminals appear as sshd: user@pts/N or sshd: user@notty
+# and are left alone. See README.md.
+#
+#   clear-stale-forwards           # kill abandoned sessions, print a summary
+#   clear-stale-forwards --dry-run # list candidates without killing
+#   clear-stale-forwards --quiet   # kill silently; for callers that log stdout
+
+set -euo pipefail
+
+dry_run=false
+quiet=false
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --dry-run) dry_run=true; shift ;;
+        --quiet) quiet=true; shift ;;
+        -h | --help)
+            sed -n '3,16p' "$0" | sed 's/^# \{0,1\}//'
+            exit 0
+            ;;
+        *)
+            echo "clear-stale-forwards: unknown option '$1'" >&2
+            exit 2
+            ;;
+    esac
+done
+
+user=$(id -un)
+killed=0
+listed=0
+
+while read -r pid; do
+    [[ -n $pid ]] || continue
+    cmd=$(tr -d '\0' < "/proc/$pid/cmdline" 2>/dev/null) || continue
+    [[ $cmd == "sshd: $user" ]] || continue
+
+    if [[ $dry_run == true ]]; then
+        ps -o pid=,lstart= -p "$pid"
+        listed=$((listed + 1))
+    elif kill "$pid" 2>/dev/null; then
+        killed=$((killed + 1))
+    fi
+done < <(pgrep -u "$user" -f '^sshd:' 2>/dev/null || true)
+
+if [[ $quiet == true ]]; then
+    printf 'cleared=%s\n' "$killed"
+elif [[ $dry_run == true ]]; then
+    if [[ $listed -eq 0 ]]; then
+        echo 'no abandoned sessions found'
+    fi
+elif [[ $killed -gt 0 ]]; then
+    echo "cleared $killed abandoned session(s)"
+else
+    echo 'no abandoned sessions found'
+fi

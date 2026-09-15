@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Installs the sender on a dev box by symlinking bin/zed onto PATH.
+# Installs the dev-box tools by symlinking bin/* onto PATH.
 #
 # A symlink rather than a copy, so a `git pull` in this checkout updates the
 # installed sender. The checkout therefore has to stay where it is.
@@ -46,50 +46,65 @@ detail() { printf '    %s\n' "$1"; }
 warn() { printf 'warning: %s\n' "$1" >&2; }
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-source_zed="$here/bin/zed"
-link="$bin_dir/zed"
+tools=(zed clear-stale-forwards)
+
+link_tool() {
+    local name=$1 source=$2 dest=$3
+    chmod +x "$source"
+    if [[ -e $dest || -L $dest ]]; then
+        if [[ -L $dest && $(realpath "$dest") == "$source" ]]; then
+            detail "$name already linked"
+        elif [[ $force == true ]]; then
+            rm "$dest"
+            ln -s "$source" "$dest"
+            detail "replaced $dest"
+        else
+            echo "install-zed-sender: $dest already exists; pass --force to replace it" >&2
+            exit 1
+        fi
+    else
+        ln -s "$source" "$dest"
+        detail "linked $dest -> $source"
+    fi
+}
+
+unlink_tool() {
+    local name=$1 source=$2 dest=$3
+    if [[ ! -L $dest ]]; then
+        detail "nothing installed at $dest"
+    elif [[ $(realpath "$dest") != "$source" ]]; then
+        detail "left alone: $dest points at $(realpath "$dest")"
+    else
+        rm "$dest"
+        detail "removed $dest"
+    fi
+}
 
 if [[ $uninstall == true ]]; then
-    step "uninstalling $link"
-    if [[ ! -L $link ]]; then
-        detail "nothing installed at $link"
-    elif [[ $(realpath "$link") != "$source_zed" ]]; then
-        # Someone else's zed. Removing it is not ours to do.
-        detail "left alone: $link points at $(realpath "$link")"
-    else
-        rm "$link"
-        detail "removed $link"
-    fi
+    step "uninstalling from $bin_dir"
+    for name in "${tools[@]}"; do
+        unlink_tool "$name" "$here/bin/$name" "$bin_dir/$name"
+    done
     echo
     echo "Uninstalled."
     exit 0
 fi
 
-[[ -f $source_zed ]] || { echo "install-zed-sender: sender not found at $source_zed" >&2; exit 1; }
-chmod +x "$source_zed"
+for name in "${tools[@]}"; do
+    [[ -f $here/bin/$name ]] || {
+        echo "install-zed-sender: $name not found at $here/bin/$name" >&2
+        exit 1
+    }
+done
 
 step "linking into $bin_dir"
 mkdir -p "$bin_dir"
 # Absolute and slash-normalized, so comparing it against PATH entries below is
 # a sound string match.
 bin_dir=$(cd "$bin_dir" && pwd)
-link="$bin_dir/zed"
-
-if [[ -e $link || -L $link ]]; then
-    if [[ -L $link && $(realpath "$link") == "$source_zed" ]]; then
-        detail "already linked"
-    elif [[ $force == true ]]; then
-        rm "$link"
-        ln -s "$source_zed" "$link"
-        detail "replaced $link"
-    else
-        echo "install-zed-sender: $link already exists; pass --force to replace it" >&2
-        exit 1
-    fi
-else
-    ln -s "$source_zed" "$link"
-    detail "linked $link -> $source_zed"
-fi
+for name in "${tools[@]}"; do
+    link_tool "$name" "$here/bin/$name" "$bin_dir/$name"
+done
 
 step "checking the install"
 
@@ -118,8 +133,8 @@ esac
 resolved=$(command -v zed 2>/dev/null || true)
 if [[ -z $resolved ]]; then
     warn "'zed' does not resolve yet; open a new shell or rehash"
-elif [[ $(realpath "$resolved") != "$source_zed" ]]; then
-    warn "'zed' resolves to $resolved, ahead of $link on PATH"
+elif [[ $(realpath "$resolved") != "$here/bin/zed" ]]; then
+    warn "'zed' resolves to $resolved, ahead of $bin_dir/zed on PATH"
 else
     detail "'zed' resolves to the sender"
 fi
@@ -133,5 +148,6 @@ fi
 
 echo
 echo "Installed."
-echo "  link : $link"
-echo "  port : 127.0.0.1:${ZED_OPEN_PORT:-7682}"
+echo "  zed    : $bin_dir/zed"
+echo "  cleanup: $bin_dir/clear-stale-forwards"
+echo "  port   : 127.0.0.1:${ZED_OPEN_PORT:-7682}"

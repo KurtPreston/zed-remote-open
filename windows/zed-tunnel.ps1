@@ -17,9 +17,10 @@
     with no agent, or an unknown host key, fails the connection rather than
     prompting an invisible process for input.
 
-    A forward that keeps failing usually means a session abandoned when this
-    machine slept is still holding the port on the dev box. Nothing here can clear
-    that; see the README.
+    A run of forward failures usually means a session abandoned when this machine
+    slept is still holding the port on the dev box. After several in a row the
+    supervisor clears those sessions over ssh (see remote/bin/clear-stale-forwards
+    and the README).
 
 .PARAMETER Port
     Loopback port to forward. Must match the listener and the sender.
@@ -126,6 +127,77 @@ function Invoke-Tunnel {
     }
 }
 
+function Resolve-CleanupScript {
+    $installed = Join-Path $PSScriptRoot 'clear-stale-forwards'
+    if (Test-Path -LiteralPath $installed -PathType Leaf) { return $installed }
+
+    $fromRepo = Join-Path (Split-Path $PSScriptRoot -Parent) 'remote\bin\clear-stale-forwards'
+    if (Test-Path -LiteralPath $fromRepo -PathType Leaf) { return $fromRepo }
+
+    return $null
+}
+
+function Invoke-ClearStaleRemoteForwards {
+    param(
+        [Parameter(Mandatory)][string]$Exe,
+        [Parameter(Mandatory)][string]$SshDestination,
+        [Parameter(Mandatory)][string]$ScriptPath,
+        [Parameter(Mandatory)][int]$ConnectTimeoutSeconds
+    )
+
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $Exe
+    $psi.ArgumentList.Add('-o')
+    $psi.ArgumentList.Add('BatchMode=yes')
+    $psi.ArgumentList.Add('-o')
+    $psi.ArgumentList.Add("ConnectTimeout=$ConnectTimeoutSeconds")
+    $psi.ArgumentList.Add('-T')
+    $psi.ArgumentList.Add($SshDestination)
+    $psi.ArgumentList.Add('bash')
+    $psi.ArgumentList.Add('-s')
+    $psi.ArgumentList.Add('--quiet')
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardInput = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    try {
+        $scriptText = [System.IO.File]::ReadAllText($ScriptPath)
+        $proc.StandardInput.Write($scriptText)
+        $proc.StandardInput.Close()
+        $stdout = $proc.StandardOutput.ReadToEnd()
+        $stderr = $proc.StandardError.ReadToEnd()
+        $proc.WaitForExit()
+        $output = ($stdout + $stderr).Trim()
+
+        if ($proc.ExitCode -ne 0) {
+            Write-Log "could not run cleanup on '$SshDestination' -- $output" 'WARN'
+            return $false
+        }
+
+        if ($output -match 'cleared=(\d+)') {
+            $count = [int]$Matches[1]
+            if ($count -gt 0) {
+                Write-Log "cleared $count abandoned session(s) on '$SshDestination'"
+            }
+            else {
+                Write-Log "no abandoned sessions found on '$SshDestination' to clear" 'WARN'
+            }
+            return $true
+        }
+
+        Write-Log "unexpected cleanup output from '$SshDestination' -- $output" 'WARN'
+        return $false
+    }
+    finally {
+        if (-not $proc.HasExited) {
+            try { $proc.Kill() } catch { }
+        }
+    }
+}
+
 try {
     $script:LogWriter = Open-LogWriter -Path $LogFile
 }
@@ -146,6 +218,11 @@ try {
 catch {
     Write-Log $_.Exception.Message 'FATAL'
     exit 1
+}
+
+$cleanupScript = Resolve-CleanupScript
+if (-not $cleanupScript) {
+    Write-Log 'clear-stale-forwards script not found beside the tunnel or under remote/bin' 'WARN'
 }
 
 $forward = '{0}:127.0.0.1:{0}' -f $Port
@@ -193,12 +270,17 @@ try {
 
         # One failure is ordinary -- a connection this tunnel just lost can still be
         # shutting down on the far end. A run of them means a session abandoned when
-        # this machine slept is still holding the port, which nothing here can
-        # clear: the holder cannot even be identified without root on the dev box.
-        # Said once per run of failures so the log names the condition without
-        # repeating it on every retry.
+        # this machine slept is still holding the port. Clear those sessions over
+        # ssh once per run, then retry at the short delay instead of backing off further.
         if ($forwardFailures -eq $StaleForwardFailures) {
-            Write-Log "the port on '$RemoteHost' is held by an abandoned session; 'zed .' there will report success and open nothing until it is cleared (see the README)" 'ERROR'
+            Write-Log "the port on '$RemoteHost' looks held by an abandoned session; clearing" 'WARN'
+            if ($cleanupScript -and (Invoke-ClearStaleRemoteForwards -Exe $sshPath -SshDestination $RemoteHost -ScriptPath $cleanupScript -ConnectTimeoutSeconds $ConnectTimeoutSeconds)) {
+                $forwardFailures = 0
+                $backoff = $MinBackoffSeconds
+            }
+            else {
+                Write-Log "'zed .' on '$RemoteHost' may report success and open nothing until the port is free (see the README)" 'ERROR'
+            }
         }
 
         Write-Log "reconnecting in ${backoff}s"

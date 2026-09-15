@@ -9,9 +9,10 @@
 #
 # Authentication has to be non-interactive: BatchMode is on, so an encrypted key
 # with no agent, or an unknown host key, fails the connection rather than
-# prompting this invisible launchd agent. A forward that keeps failing usually
+# prompting this invisible launchd agent. A run of forward failures usually
 # means a session abandoned when this machine slept is still holding the port on
-# the dev box; nothing here can clear that (see the README).
+# the dev box; after several in a row the supervisor clears those sessions over
+# ssh (see remote/bin/clear-stale-forwards and the README).
 #
 #   zed-tunnel.sh --remote-host <host> [--port N] [--ssh-bin <path>] [--log <file>]
 
@@ -22,6 +23,8 @@ PATH=/usr/bin:/bin:/usr/sbin:/sbin:$PATH
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=zed-lib.sh
 . "$here/zed-lib.sh"
+
+cleanup_script="$(cd "$here/.." && pwd)/remote/bin/clear-stale-forwards"
 
 remote_host=""
 port=$ZED_OPEN_PORT
@@ -133,10 +136,16 @@ while true; do
     fi
 
     # One failure is ordinary; a run of them means a session abandoned when this
-    # machine slept is still holding the port, which nothing here can clear.
-    # Said once per run so the log names the condition without repeating it.
+    # machine slept is still holding the port. Clear those sessions over ssh once
+    # per run, then retry at the short delay instead of backing off further.
     if [[ $forward_failures -eq $stale_forward_failures ]]; then
-        zed_log ERROR "the port on '$remote_host' is held by an abandoned session; 'zed .' there will report success and open nothing until it is cleared (see the README)"
+        zed_log WARN "the port on '$remote_host' looks held by an abandoned session; clearing"
+        if clear_stale_remote_forwards "$ssh_bin" "$remote_host" "$cleanup_script" "$connect_timeout"; then
+            forward_failures=0
+            backoff=$min_backoff
+        else
+            zed_log ERROR "'zed .' on '$remote_host' may report success and open nothing until the port is free (see the README)"
+        fi
     fi
 
     zed_log INFO "reconnecting in ${backoff}s"

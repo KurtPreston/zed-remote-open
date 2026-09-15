@@ -164,3 +164,38 @@ zed_url_for_cli() {
         printf '%s' "${url%/}"
     fi
 }
+
+# --- stale forward cleanup --------------------------------------------------
+# Pipes clear-stale-forwards to the dev box over ssh. The script lives in this
+# checkout under remote/bin/; the tunnel supervisor calls it when a run of
+# "remote port forwarding failed" errors suggests a session abandoned by sleep.
+clear_stale_remote_forwards() {
+    # clear_stale_remote_forwards SSH_BIN REMOTE_HOST CLEANUP_SCRIPT CONNECT_TIMEOUT
+    local ssh_bin=$1 remote_host=$2 cleanup_script=$3 connect_timeout=$4
+    local output rc=0
+
+    if [[ ! -f $cleanup_script ]]; then
+        zed_log WARN "cleanup script missing at $cleanup_script"
+        return 1
+    fi
+
+    output=$("$ssh_bin" -o BatchMode=yes -o "ConnectTimeout=$connect_timeout" -T "$remote_host" \
+        'bash -s --quiet' <"$cleanup_script" 2>&1) || rc=$?
+
+    if [[ $rc -ne 0 ]]; then
+        zed_log WARN "could not run cleanup on '$remote_host' -- $output"
+        return "$rc"
+    fi
+
+    if [[ $output =~ cleared=([0-9]+) ]]; then
+        if [[ ${BASH_REMATCH[1]} -gt 0 ]]; then
+            zed_log INFO "cleared ${BASH_REMATCH[1]} abandoned session(s) on '$remote_host'"
+        else
+            zed_log WARN "no abandoned sessions found on '$remote_host' to clear"
+        fi
+    else
+        zed_log WARN "unexpected cleanup output from '$remote_host' -- $output"
+    fi
+
+    return 0
+}

@@ -42,10 +42,10 @@ cd remote
 ./install-zed-sender.sh
 ```
 
-This symlinks `remote/bin/zed` into `~/.local/bin`, then checks that the link
-wins the `zed` lookup on `PATH` and that `ZED_SSH_HOST` is set. It is a symlink
-rather than a copy, so a `git pull` here updates the installed sender — leave the
-checkout where it is.
+This symlinks `remote/bin/zed` and `remote/bin/clear-stale-forwards` into
+`~/.local/bin`, then checks that the `zed` link wins the lookup on `PATH` and
+that `ZED_SSH_HOST` is set. Symlinks rather than copies, so a `git pull` here
+updates the installed tools — leave the checkout where it is.
 
 Re-running is idempotent. Useful switches: `--bin-dir`, `--force`, `--uninstall`.
 
@@ -278,25 +278,29 @@ connections on the dev box, so `zed .` prints `Opening ssh://…` and no window 
 appears. `check-zed-remote-open.ps1 -CheckRemote` names the condition, and the
 tunnel log calls it out after a run of failures.
 
-The dev box reaps the abandoned session on its own once TCP keepalive gives up,
-which takes roughly two hours. To clear it now, find the session holding the port
-and kill it:
+After several consecutive `remote port forwarding failed` errors, the tunnel
+supervisor SSHs to the dev box and runs
+[`remote/bin/clear-stale-forwards`](remote/bin/clear-stale-forwards), which kills
+only `sshd: $USER` sessions — abandoned `-R` forwards left behind by sleep. Zed
+remote sessions and terminals appear as `sshd: user@pts/N` or `sshd: user@notty`
+and are left alone. You can run the same script yourself on the dev box:
 
 ```bash
-# on the dev box -- sessions with no pty and no command are abandoned -R forwards
-pgrep -u "$USER" -f '^sshd:' | while read -r pid; do
-  [ "$(tr -d '\0' < /proc/$pid/cmdline)" = "sshd: $USER" ] && ps -o pid=,lstart= -p "$pid"
-done
+clear-stale-forwards          # kill abandoned sessions
+clear-stale-forwards --dry-run  # list candidates without killing
 ```
 
-Kill the one whose start time matches no live `ssh.exe` on the workstation. Your
-Zed sessions and terminals are not candidates: they appear as `sshd: user@pts/N`
-or `sshd: user@notty` and the filter above skips them.
+The tunnel pipes the script over ssh, so reinstalling the workstation listener
+copies it into `%LOCALAPPDATA%\zed-listener` on Windows; a `git pull` in this
+checkout is enough on macOS.
 
-The tunnel cannot do this for you. Identifying the holder exactly would mean
-mapping the listening socket's inode to a process, and sshd drops privileges,
-which leaves `/proc/<pid>/fd` readable only by root — `ss -p`, `lsof` and `fuser`
-are blocked by the same thing.
+Without root on the dev box, identifying the exact socket holder would mean mapping
+the listening socket's inode to a process, and sshd drops privileges — `ss -p`,
+`lsof` and `fuser` are blocked by the same thing. The cmdline filter above is the
+practical substitute.
+
+The dev box reaps abandoned sessions on its own once TCP keepalive gives up, which
+takes roughly two hours if the tunnel has not cleared them first.
 
 Two settings would fix this properly, and both live in the dev box's
 `sshd_config`, so they need whoever administers it:
@@ -360,8 +364,9 @@ manual calls `inetdCompatibility` legacy, but its replacement,
 `launch_activate_socket(3)`, is a C API no shell can reach.
 
 The tunnel is a plain `RunAtLoad` + `KeepAlive` agent whose own loop supervises
-one `ssh -N -R`, with the same backoff and stale-forward reporting as the Windows
-one. It owns the forward for the same reason: so it survives projects opening and
+one `ssh -N -R`, with the same backoff, stale-forward reporting, and automatic
+cleanup as the Windows one. It owns the forward for the same reason: so it
+survives projects opening and
 closing, and stays up with no project open at all. Its shutdown is signal-driven
 — the backoff sleep is interruptible so a `launchctl bootout` does not wait out
 the delay, and a trap kills the ssh child so the forward never outlives the
