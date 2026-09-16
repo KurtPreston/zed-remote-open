@@ -41,11 +41,13 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# stdout is the socket, and the protocol forbids writing anything back, so point
-# our own output at the log before emitting a single line. It has to be an open
-# on our side rather than a `>> file` redirect baked into the plist: launchd
-# would hand that inheritable handle to the CLI and the ssh it spawns, which keep
-# it open for the whole remote session, after which no restart could reopen it.
+# stdout is the accepted socket (launchd inetd mode). Save it on fd 9 so the ack
+# can go back to the sender after stdout is redirected to the log below, then point
+# our own diagnostics at the log. The redirect is an open on our side rather than a
+# `>> file` baked into the plist: launchd would hand that inheritable handle to the
+# CLI and the ssh it spawns, which keep it open for the whole remote session, after
+# which no restart could reopen it.
+exec 9>&1
 mkdir -p "$(dirname "$log_file")" 2>/dev/null || true
 exec >>"$log_file" 2>&1
 
@@ -82,6 +84,14 @@ if ! zed_url_valid "$url"; then
     zed_log WARN "rejected malformed url: '$shown'"
     exit 0
 fi
+
+# Acknowledge a valid request so the sender can tell a live listener from a
+# half-open forward that silently accepts and drops. Sent before the (slower)
+# launch so the reply is prompt, then fd 9 is closed so the Zed CLI spawned below
+# never inherits the socket and pin it open for the whole remote session. See
+# docs/PROTOCOL.md.
+printf 'OK\n' >&9 2>/dev/null || zed_log WARN "could not send ack to sender"
+exec 9>&-
 
 if [[ -z $zed_bin ]]; then
     zed_bin=$(resolve_zed_cli || true)

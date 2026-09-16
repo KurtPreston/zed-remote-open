@@ -384,6 +384,21 @@ try {
                 continue
             }
 
+            # Acknowledge a valid request so the sender can tell a live listener
+            # from a half-open forward that silently accepts and drops. Sent before
+            # the (slower) launch so the reply is prompt; see docs/PROTOCOL.md. A
+            # failed write just means the sender already hung up, which must not
+            # stop the launch, so it is logged and swallowed.
+            try {
+                $ackBytes = [System.Text.Encoding]::ASCII.GetBytes("OK`n")
+                $ackStream = $client.GetStream()
+                $ackStream.Write($ackBytes, 0, $ackBytes.Length)
+                $ackStream.Flush()
+            }
+            catch {
+                Write-Log "could not send ack to ${peer}: $($_.Exception.Message)" 'WARN'
+            }
+
             Write-Log "opening $url"
 
             $placement = Resolve-Placement -Url $url -OpenedUrls $script:OpenedUrls -Database $dbPath

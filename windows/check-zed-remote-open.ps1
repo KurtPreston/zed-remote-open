@@ -391,10 +391,22 @@ if ($Probe) {
     Write-Host 'Probe (opens a Zed window)'
     try {
         $client = [System.Net.Sockets.TcpClient]::new('127.0.0.1', $Port)
-        $writer = [System.IO.StreamWriter]::new($client.GetStream())
+        $stream = $client.GetStream()
+        $writer = [System.IO.StreamWriter]::new($stream)
         $writer.WriteLine("ssh://$RemoteHost/")
-        $writer.Flush(); $client.Close()
-        Test-Ok 'probe URL delivered' "ssh://$RemoteHost/"
+        $writer.Flush()
+        # Read the listener's ack the way the sender does, so the probe proves the
+        # round trip rather than only that the port accepted the bytes.
+        $stream.ReadTimeout = 5000
+        $ack = $null
+        try { $ack = [System.IO.StreamReader]::new($stream).ReadLine() } catch { }
+        $client.Close()
+        if ($ack -like 'OK*') {
+            Test-Ok 'probe acknowledged' "ssh://$RemoteHost/ (listener replied '$ack')"
+        }
+        else {
+            Test-Warn 'probe delivered but not acknowledged' 'the port took the bytes but sent no OK; update the listener to the ack protocol'
+        }
     }
     catch {
         Test-Bad 'probe failed' $_.Exception.Message

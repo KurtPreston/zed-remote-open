@@ -14,14 +14,33 @@ SSH forwards that to `127.0.0.1:7682` on the workstation via a reverse forward
 
 ## Framing
 
-One connection carries exactly one request:
+One connection carries exactly one request and one acknowledgement:
 
 1. The sender writes a single URL terminated by `\n`.
-2. The sender closes its end immediately.
-3. The sender does **not** read a response.
+2. The listener validates the URL and, the instant it accepts one, writes a single
+   `OK\n` line back — before it launches Zed, so the reply is prompt.
+3. The sender reads that line (with a short timeout) as proof a live listener
+   received the request, then closes its end.
 
-A listener therefore must not write anything back. Treat EOF without a trailing
-newline as a complete request, since the close may arrive coalesced with the data.
+Treat EOF without a trailing newline as a complete request, since the close may
+arrive coalesced with the data.
+
+The acknowledgement exists because the dev box's `sshd` keeps accepting
+connections on the forwarded port after the workstation's SSH session dies: a
+`zed .` then connects, writes, and its bytes are discarded into the half-open
+forward. With no reply to wait for, the sender would print success and no window
+would ever appear. Silence — no line, or a timeout — is how the sender tells that
+half-open forward from a live listener, and it reports an error instead.
+
+The listener writes **only** `OK\n`, and only for a request that passed
+validation. A rejected or malformed request gets no reply; the sender reads that
+same silence as a failure, which is correct, since it only ever sends
+pattern-valid URLs and a rejection would mean a bug on its own side.
+
+Because the sender now requires the ack, every side has to move together: deploy
+the listener before the sender, so an updated sender never meets a listener too
+old to answer it. A listener that sends the ack to a sender too old to read it
+does no harm — the extra bytes are discarded when that sender closes.
 
 ## URL shape
 
@@ -104,6 +123,9 @@ untrusted input even though it arrives on loopback.
   replace the open project instead.
 - Pass the URL as one argv entry. Never interpolate it into a shell command
   string.
+- Reply with `OK\n` the moment a request passes validation, before launching Zed,
+  and only then. A failed write means the sender already hung up; log it and
+  launch anyway — one gone sender must not stop the open.
 - Cap the request size and time out slow senders.
 - A rejected request, a timeout, or a failed launch is logged and the accept loop
   continues. One bad request must never stop the service.

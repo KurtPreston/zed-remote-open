@@ -59,6 +59,9 @@ if [[ ! -e $path ]]; then
 fi
 
 port="${ZED_OPEN_PORT:-7682}"
+# How long to wait for the listener's ack before treating the tunnel as down. A
+# live listener replies in milliseconds; only a dead tunnel waits this out.
+ack_timeout="${ZED_OPEN_ACK_TIMEOUT:-5}"
 resolved=$(realpath "$path")
 
 # Say whether this is a directory or a file, because the listener cannot work it
@@ -88,6 +91,24 @@ if ! { exec 3<>"/dev/tcp/127.0.0.1/$port"; } 2>/dev/null; then
 fi
 
 printf '%s\n' "$url" >&3
+
+# A live listener replies with a single 'OK' line the instant it accepts the URL.
+# Silence means the bytes fell into a half-open reverse forward: the workstation's
+# SSH session is gone, but this box's sshd still accepts the connection and
+# discards whatever it forwards. Without this the open would print success and no
+# window would ever appear. See docs/PROTOCOL.md.
+ack=""
+IFS= read -r -t "$ack_timeout" ack <&3 || true
+ack=${ack%$'\r'}
 exec 3<&-
 
-echo "Opening $url"
+if [[ $ack == OK* ]]; then
+    echo "Opening $url"
+else
+    echo "zed: no acknowledgement from the workstation for $url" >&2
+    echo "  the request reached this box's port but nothing answered -- the SSH" >&2
+    echo "  tunnel is down (a stale forward still accepts the connection and" >&2
+    echo "  drops it). on the workstation, run the doctor to check the tunnel:" >&2
+    echo "    windows/check-zed-remote-open.ps1   (or macos/check-zed-remote-open.sh)" >&2
+    exit 1
+fi
