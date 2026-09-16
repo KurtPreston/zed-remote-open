@@ -179,8 +179,10 @@ clear_stale_remote_forwards() {
         return 1
     fi
 
+    # '--' ends bash's own option parsing so '--quiet' reaches the piped script as
+    # $1 rather than being read as a bash long option ('bash: --: invalid option').
     output=$("$ssh_bin" -o BatchMode=yes -o "ConnectTimeout=$connect_timeout" -T "$remote_host" \
-        'bash -s --quiet' <"$cleanup_script" 2>&1) || rc=$?
+        'bash -s -- --quiet' <"$cleanup_script" 2>&1) || rc=$?
 
     if [[ $rc -ne 0 ]]; then
         zed_log WARN "could not run cleanup on '$remote_host' -- $output"

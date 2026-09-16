@@ -155,6 +155,9 @@ function Invoke-ClearStaleRemoteForwards {
     $psi.ArgumentList.Add($SshDestination)
     $psi.ArgumentList.Add('bash')
     $psi.ArgumentList.Add('-s')
+    # '--' ends bash's own option parsing so '--quiet' reaches the piped script as
+    # $1 rather than being read as a bash long option ('bash: --: invalid option').
+    $psi.ArgumentList.Add('--')
     $psi.ArgumentList.Add('--quiet')
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
