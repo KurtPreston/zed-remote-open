@@ -56,7 +56,10 @@ param(
 
     [int]$MinBackoffSeconds = 5,
 
-    [int]$MaxBackoffSeconds = 300,
+    # Capped low so a transient drop (VPN reconnect, wake from sleep) recovers
+    # within a minute rather than sitting out a multi-minute backoff. A failed
+    # connect is cheap, so a retry a minute is not a reconnect storm.
+    [int]$MaxBackoffSeconds = 60,
 
     [int]$StableSeconds = 60,
 
@@ -247,9 +250,16 @@ Write-Log "forward: -R $forward to '$RemoteHost'"
 
 $backoff = $MinBackoffSeconds
 $forwardFailures = 0
+# A healthy session has existed since the last time we cleared the remote port.
+# When one drops and the very next connect cannot bind the forward, the holder is
+# almost always our own just-abandoned session -- the VPN-reconnect and wake-from-
+# sleep case -- so that first failure is enough to justify clearing, without
+# waiting out $StaleForwardFailures more rounds of backoff.
+$sawStableConnection = $false
 try {
     while ($true) {
         $startedAt = Get-Date
+        $forwardFailedThisRun = $false
         try {
             $result = Invoke-Tunnel -Exe $sshPath -SshArgs $sshArgs
             $uptime = (Get-Date) - $startedAt
@@ -262,26 +272,37 @@ try {
             # A connection that stayed up is evidence the dev box is reachable, so
             # a later drop starts over at the short delay instead of inheriting the
             # backoff from whatever outage came before it.
-            if ($uptime.TotalSeconds -ge $StableSeconds) { $backoff = $MinBackoffSeconds }
+            if ($uptime.TotalSeconds -ge $StableSeconds) {
+                $backoff = $MinBackoffSeconds
+                $sawStableConnection = $true
+            }
 
-            if ($result.Stderr -match 'remote port forwarding failed') { $forwardFailures++ }
+            if ($result.Stderr -match 'remote port forwarding failed') {
+                $forwardFailures++
+                $forwardFailedThisRun = $true
+            }
             else { $forwardFailures = 0 }
         }
         catch {
             Write-Log "could not start ssh -- $($_.Exception.Message)" 'ERROR'
         }
 
-        # One failure is ordinary -- a connection this tunnel just lost can still be
-        # shutting down on the far end. A run of them means a session abandoned when
-        # this machine slept is still holding the port. Clear those sessions over
-        # ssh once per run, then retry at the short delay instead of backing off further.
-        if ($forwardFailures -eq $StaleForwardFailures) {
+        # Clear the remote's stale forward when a forward-failure either follows a
+        # previously healthy session (our own abandoned session almost certainly
+        # still holds the port) or has piled up to the threshold (the slower path
+        # for outages that never had a healthy session to begin with). Then retry
+        # at the short delay instead of backing off further.
+        $shouldClear = $forwardFailedThisRun -and ($sawStableConnection -or $forwardFailures -ge $StaleForwardFailures)
+        if ($shouldClear) {
             Write-Log "the port on '$RemoteHost' looks held by an abandoned session; clearing" 'WARN'
             if ($cleanupScript -and (Invoke-ClearStaleRemoteForwards -Exe $sshPath -SshDestination $RemoteHost -ScriptPath $cleanupScript -ConnectTimeoutSeconds $ConnectTimeoutSeconds)) {
                 $forwardFailures = 0
+                $sawStableConnection = $false
                 $backoff = $MinBackoffSeconds
             }
             else {
+                # Clear it off so a failed cleanup does not fire on every retry.
+                $sawStableConnection = $false
                 Write-Log "'zed .' on '$RemoteHost' may report success and open nothing until the port is free (see the README)" 'ERROR'
             }
         }

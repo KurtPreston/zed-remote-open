@@ -35,7 +35,10 @@ alive_interval=30
 alive_count_max=3
 connect_timeout=15
 min_backoff=5
-max_backoff=300
+# Capped low so a transient drop (VPN reconnect, wake from sleep) recovers within
+# a minute rather than sitting out a multi-minute backoff. A failed connect is
+# cheap, so a retry a minute is not a reconnect storm.
+max_backoff=60
 stable_seconds=60
 max_stderr_lines=5
 stale_forward_failures=3
@@ -98,6 +101,12 @@ zed_log INFO "forward: -R $forward to '$remote_host'"
 
 backoff=$min_backoff
 forward_failures=0
+# A healthy session has existed since the last time we cleared the remote port.
+# When one drops and the very next connect cannot bind the forward, the holder is
+# almost always our own just-abandoned session -- the VPN-reconnect and wake-from-
+# sleep case -- so that first failure is enough to justify clearing, without
+# waiting out $stale_forward_failures more rounds of backoff.
+saw_stable=0
 stderr_tmp=$(mktemp "${TMPDIR:-/tmp}/zed-tunnel.XXXXXX")
 
 while true; do
@@ -127,23 +136,32 @@ while true; do
     # drop starts over at the short delay instead of inheriting the outage's backoff.
     if [[ $uptime -ge $stable_seconds ]]; then
         backoff=$min_backoff
+        saw_stable=1
     fi
 
+    forward_failed_this_run=0
     if grep -qi 'remote port forwarding failed' "$stderr_tmp"; then
         forward_failures=$((forward_failures + 1))
+        forward_failed_this_run=1
     else
         forward_failures=0
     fi
 
-    # One failure is ordinary; a run of them means a session abandoned when this
-    # machine slept is still holding the port. Clear those sessions over ssh once
-    # per run, then retry at the short delay instead of backing off further.
-    if [[ $forward_failures -eq $stale_forward_failures ]]; then
+    # Clear the remote's stale forward when a forward-failure either follows a
+    # previously healthy session (our own abandoned session almost certainly still
+    # holds the port) or has piled up to the threshold (the slower path for outages
+    # that never had a healthy session to begin with). Then retry at the short
+    # delay instead of backing off further.
+    if [[ $forward_failed_this_run -eq 1 ]] &&
+       { [[ $saw_stable -eq 1 ]] || [[ $forward_failures -ge $stale_forward_failures ]]; }; then
         zed_log WARN "the port on '$remote_host' looks held by an abandoned session; clearing"
         if clear_stale_remote_forwards "$ssh_bin" "$remote_host" "$cleanup_script" "$connect_timeout"; then
             forward_failures=0
+            saw_stable=0
             backoff=$min_backoff
         else
+            # Clear it off so a failed cleanup does not fire on every retry.
+            saw_stable=0
             zed_log ERROR "'zed .' on '$remote_host' may report success and open nothing until the port is free (see the README)"
         fi
     fi
