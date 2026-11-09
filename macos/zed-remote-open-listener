@@ -11,7 +11,7 @@
 # request, a slow sender, or a crash takes down only its own short-lived process
 # and launchd serves the next connection regardless.
 #
-#   zed-open-handler.sh --zed-bin <path> [--log <file>] [--state <file>]
+#   zed-remote-open-listener --zed-bin <path> [--log <file>] [--state <file>]
 
 set -uo pipefail  # not -e: read returns non-zero at EOF, which is a valid frame
 

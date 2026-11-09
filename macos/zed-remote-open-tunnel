@@ -14,7 +14,7 @@
 # the dev box; after several in a row the supervisor clears those sessions over
 # ssh (see remote/bin/clear-stale-forwards and the README).
 #
-#   zed-tunnel.sh --remote-host <host> [--port N] [--ssh-bin <path>] [--log <file>]
+#   zed-remote-open-tunnel --remote-host <host> [--port N] [--ssh-bin <path>] [--log <file>]
 
 set -uo pipefail
 

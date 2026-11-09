@@ -350,16 +350,23 @@ agents, because a launchd agent starts with a minimal PATH. The CLI is used from
 inside its `.app` bundle and never copied out: it finds its own app by walking up
 from its executable, so a copy elsewhere launches nothing.
 
-| Agent | Does |
-| --- | --- |
-| `zed-remote-open.listener` | serves `127.0.0.1:7682` and hands each URL to the local Zed |
-| `zed-remote-open.tunnel` | keeps `ssh -N -R 7682:127.0.0.1:7682 desktop` up |
+| Agent | Runs | Does |
+| --- | --- | --- |
+| `zed-remote-open.listener` | `zed-remote-open-listener` | serves `127.0.0.1:7682` and hands each URL to the local Zed |
+| `zed-remote-open.tunnel` | `zed-remote-open-tunnel` | keeps `ssh -N -R 7682:127.0.0.1:7682 desktop` up |
+
+Each agent runs its script directly, not through `/bin/bash`, because System
+Settings › General › Login Items lists a background agent by the name of the
+program it runs. The scripts are named after their agents so the two entries
+read `zed-remote-open-listener` and `zed-remote-open-tunnel`, not "bash" twice.
+An install from before the rename still points at the old script names, so
+re-run the installer after pulling.
 
 ### Two launchd agents, not two loops
 
 The listener is socket-activated. Its plist carries `inetdCompatibility` with
 `Wait: false` and a `Sockets` entry, so **launchd** binds `127.0.0.1:7682` and
-hands each accepted connection to a fresh copy of `zed-open-handler.sh` on stdio.
+hands each accepted connection to a fresh copy of `zed-remote-open-listener` on stdio.
 The port is therefore bound from load onward whether or not Zed is running —
 the property the Windows install gets from a watchdog Scheduled Task — and
 because every request is its own short-lived process, a malformed URL, a slow
