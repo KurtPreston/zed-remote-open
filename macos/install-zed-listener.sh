@@ -40,8 +40,8 @@ listener_log="$ZED_LISTENER_LOG_DIR/zed-listener.log"
 tunnel_log="$ZED_LISTENER_LOG_DIR/zed-tunnel.log"
 launchd_out="$ZED_LISTENER_LOG_DIR/launchd.out.log"
 
-handler_script="$here/zed-open-handler.sh"
-tunnel_script="$here/zed-tunnel.sh"
+handler_script="$here/zed-remote-open-listener"
+tunnel_script="$here/zed-remote-open-tunnel"
 
 domain="gui/$(id -u)"
 
@@ -69,6 +69,14 @@ done
 bootout() {
     # bootout LABEL; quiet, and not an error if it was not loaded.
     launchctl bootout "$domain/$1" 2>/dev/null || true
+
+    # bootout can return while the old instance is still shutting down, and a
+    # bootstrap in that window fails, so wait up to 10s for it to be gone.
+    local i
+    for ((i = 0; i < 50; i++)); do
+        launchctl print "$domain/$1" >/dev/null 2>&1 || return 0
+        sleep 0.2
+    done
 }
 
 if [[ $uninstall == true ]]; then
@@ -109,7 +117,12 @@ fi
 for f in "$handler_script" "$tunnel_script" "$here/zed-lib.sh" "$here/zed-placement.sh"; do
     [[ -f $f ]] || { echo "install-zed-listener: missing $f" >&2; exit 1; }
 done
+# launchd runs both scripts directly rather than through /bin/bash, so macOS
+# Login Items lists each agent by its script's name instead of as "bash".
 chmod +x "$handler_script" "$tunnel_script" 2>/dev/null || true
+for f in "$handler_script" "$tunnel_script"; do
+    [[ -x $f ]] || { echo "install-zed-listener: $f is not executable" >&2; exit 1; }
+done
 
 mkdir -p "$agents_dir" "$ZED_LISTENER_LOG_DIR" "$ZED_LISTENER_STATE_DIR"
 
@@ -136,7 +149,6 @@ cat >"$listener_plist" <<PLIST
     <string>$listener_label</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/bin/bash</string>
         <string>$(xml_escape "$handler_script")</string>
         <string>--zed-bin</string>
         <string>$(xml_escape "$zed_bin")</string>
@@ -189,7 +201,6 @@ if [[ $no_tunnel == false ]]; then
     <string>$tunnel_label</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/bin/bash</string>
         <string>$(xml_escape "$tunnel_script")</string>
         <string>--remote-host</string>
         <string>$(xml_escape "$remote_host")</string>
