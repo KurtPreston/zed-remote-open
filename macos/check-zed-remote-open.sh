@@ -44,6 +44,16 @@ warn() { warnings=$((warnings + 1)); printf '  [warn] %s\n' "$1"; [[ $# -ge 2 ]]
 
 forward="$port:127.0.0.1:$port"
 
+# Seconds since a process started. macOS ps has no etimes keyword, only etime,
+# formatted [[dd-]hh:]mm:ss; 10# keeps a leading zero from reading as octal.
+elapsed_seconds() {
+    local etime
+    etime=$(ps -o etime= -p "$1" 2>/dev/null | tr -d ' ')
+    [[ $etime =~ ^(([0-9]+)-)?(([0-9]+):)?([0-9]+):([0-9]+)$ ]] || return 1
+    echo $(( 10#${BASH_REMATCH[2]:-0} * 86400 + 10#${BASH_REMATCH[4]:-0} * 3600 \
+        + 10#${BASH_REMATCH[5]} * 60 + 10#${BASH_REMATCH[6]} ))
+}
+
 echo
 echo "zed-remote-open doctor (host '$remote_host', port $port)"
 
@@ -143,7 +153,7 @@ if [[ $tunnel_loaded == true ]]; then
         [[ -n $cmd ]] || continue
         if printf '%s' "$cmd" | grep -q 'ExitOnForwardFailure=yes'; then
             # Surviving the settle window is the evidence, not mere existence.
-            elapsed=$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ')
+            elapsed=$(elapsed_seconds "$pid" || true)
             if [[ -n $elapsed && $elapsed -ge $established_seconds ]]; then
                 ours="$ours $pid"
             elif [[ -z $ours ]]; then
