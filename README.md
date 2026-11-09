@@ -283,7 +283,10 @@ supervisor SSHs to the dev box and runs
 [`remote/bin/clear-stale-forwards`](remote/bin/clear-stale-forwards), which kills
 only `sshd: $USER` sessions — abandoned `-R` forwards left behind by sleep. Zed
 remote sessions and terminals appear as `sshd: user@pts/N` or `sshd: user@notty`
-and are left alone. You can run the same script yourself on the dev box:
+and are left alone. OpenSSH 9.8 and later, including the one macOS ships, title
+the same sessions `sshd-session:` instead, and the script matches both. It reads
+`/proc` where there is one and `ps` where there is not, so a macOS dev box works
+too. You can run the same script yourself on the dev box:
 
 ```bash
 clear-stale-forwards          # kill abandoned sessions

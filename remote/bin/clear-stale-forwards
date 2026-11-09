@@ -7,9 +7,10 @@
 # "remote port forwarding failed" while the port still accepts connections, so
 # `zed .` reports success and opens nothing.
 #
-# Only processes whose cmdline is exactly "sshd: $USER" are candidates. Zed
-# remote sessions and terminals appear as sshd: user@pts/N or sshd: user@notty
-# and are left alone. See README.md.
+# Only processes whose cmdline is exactly "sshd: $USER" are candidates, or
+# "sshd-session: $USER" from OpenSSH 9.8 on, which macOS ships. Zed remote
+# sessions and terminals appear as sshd: user@pts/N or sshd: user@notty and are
+# left alone. See README.md.
 #
 #   clear-stale-forwards           # kill abandoned sessions, print a summary
 #   clear-stale-forwards --dry-run # list candidates without killing
@@ -25,7 +26,7 @@ while [[ $# -gt 0 ]]; do
         --dry-run) dry_run=true; shift ;;
         --quiet) quiet=true; shift ;;
         -h | --help)
-            sed -n '3,16p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '3,17p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)
@@ -39,10 +40,23 @@ user=$(id -un)
 killed=0
 listed=0
 
+# A process's title as sshd set it. Linux pads it with NULs in /proc; macOS has
+# no /proc, and ps pads the rewritten argv with trailing spaces instead.
+process_title() {
+    local pid=$1 title
+    if [[ -r /proc/$pid/cmdline ]]; then
+        title=$(tr -d '\0' < "/proc/$pid/cmdline" 2>/dev/null) || return 1
+    else
+        title=$(ps -o command= -p "$pid" 2>/dev/null) || return 1
+    fi
+    title=${title%"${title##*[![:space:]]}"}
+    printf '%s\n' "$title"
+}
+
 while read -r pid; do
     [[ -n $pid ]] || continue
-    cmd=$(tr -d '\0' < "/proc/$pid/cmdline" 2>/dev/null) || continue
-    [[ $cmd == "sshd: $user" ]] || continue
+    cmd=$(process_title "$pid") || continue
+    [[ $cmd == "sshd: $user" || $cmd == "sshd-session: $user" ]] || continue
 
     if [[ $dry_run == true ]]; then
         ps -o pid=,lstart= -p "$pid"
@@ -50,7 +64,7 @@ while read -r pid; do
     elif kill "$pid" 2>/dev/null; then
         killed=$((killed + 1))
     fi
-done < <(pgrep -u "$user" -f '^sshd:' 2>/dev/null || true)
+done < <(pgrep -u "$user" -f '^sshd(-session)?:' 2>/dev/null || true)
 
 if [[ $quiet == true ]]; then
     printf 'cleared=%s\n' "$killed"
