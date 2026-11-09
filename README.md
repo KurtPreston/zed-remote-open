@@ -173,8 +173,10 @@ That sees the projects you opened through Zed's own UI as well as the ones the
 listener opened. It gates on a live Zed process first, because Zed leaves
 `session_id` bound on a workspace after a quit or a crash so it can restore it
 next launch, and `kv_store.session_id` is not replaced until that launch — so the
-query alone would report a quit Zed's last projects as still open. A path equal to
-or inside an open project resolves to no flag; any other directory gets `--reuse`.
+query alone would report a quit Zed's last projects as still open. A directory
+that is an open project's root resolves to no flag; any other directory gets
+`--reuse`, including a subdirectory of an open project, which Zed's own lookup
+does not match and would otherwise give a window of its own.
 Every uncertain case resolves to no flag, because a stray window is cheaper than a
 corrupted project.
 
@@ -423,9 +425,10 @@ This sees projects opened through Zed's own UI too, and not just the ones the
 handler opened. It gates on a live Zed process first (`pgrep`), because Zed
 leaves the `session_id` bound on a workspace after a quit or crash so it can
 restore next launch, and `kv_store.session_id` is not replaced until that launch
-— so the query alone would report a quit Zed's last projects as still open. A path
-equal to or inside an open project resolves to no flag; any other directory gets
-`--reuse`. A file never takes `--reuse` at all, and is recognised by the trailing
+— so the query alone would report a quit Zed's last projects as still open. A
+directory that is an open project's root resolves to no flag; any other directory,
+a subdirectory of an open project included, gets `--reuse`. A file never takes
+`--reuse` at all, and is recognised by the trailing
 slash the sender puts on a directory and not on a file. If the database cannot be
 read, placement falls back to an `open-projects.txt` beside the state directory,
 which records only what the handler itself opened.
