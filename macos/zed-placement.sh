@@ -65,18 +65,17 @@ zed_state_open_paths() {
     done <"$ZED_STATE_FILE"
 }
 
-# Given the target path on stdin's list of open paths, is it already open? A path
-# equal to an open one, or nested inside it, counts as open.
+# Given the target directory, is it already open as a project? Only a root
+# counts, compared exactly: Zed's default lookup matches a file inside a worktree
+# but not a subdirectory, so with no flag a subdirectory of an open project gets
+# a window of its own. --reuse is safe there, because a different root is a
+# different workspace and never restarts the open project's remote server.
 zed_path_is_open() {
     # zed_path_is_open TARGET  < open-paths
-    local target=$1 open base
+    local target=${1%/} open
     while IFS= read -r open; do
         [[ -n $open ]] || continue
-        if [[ $target == "$open" ]]; then
-            return 0
-        fi
-        base=${open%/}
-        if [[ $target == "$base"/* ]]; then
+        if [[ $target == "${open%/}" ]]; then
             return 0
         fi
     done

@@ -213,18 +213,22 @@ SELECT w.paths FROM workspaces w
     return $paths.ToArray()
 }
 
-# A path equal to an open one, or nested inside it, counts as open. Ordinal and
-# case-sensitive: these are POSIX paths on the dev box.
+# Given the target directory, is it already open as a project? Only a root
+# counts, compared exactly: Zed's default lookup matches a file inside a worktree
+# but not a subdirectory, so with no flag a subdirectory of an open project gets
+# a window of its own. --reuse is safe there, because a different root is a
+# different workspace and never restarts the open project's remote server.
+# Ordinal and case-sensitive: these are POSIX paths on the dev box.
 function Test-PathIsOpen {
     param(
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$OpenPaths
     )
 
+    $target = $Path.TrimEnd('/')
     foreach ($open in $OpenPaths) {
         if (-not $open) { continue }
-        if ([string]::Equals($Path, $open, [StringComparison]::Ordinal)) { return $true }
-        if ($Path.StartsWith($open.TrimEnd('/') + '/', [StringComparison]::Ordinal)) { return $true }
+        if ([string]::Equals($target, $open.TrimEnd('/'), [StringComparison]::Ordinal)) { return $true }
     }
     return $false
 }
