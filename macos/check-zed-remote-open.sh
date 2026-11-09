@@ -44,6 +44,16 @@ warn() { warnings=$((warnings + 1)); printf '  [warn] %s\n' "$1"; [[ $# -ge 2 ]]
 
 forward="$port:127.0.0.1:$port"
 
+# Seconds since a process started. macOS ps has no etimes keyword, only etime,
+# formatted [[dd-]hh:]mm:ss; 10# keeps a leading zero from reading as octal.
+elapsed_seconds() {
+    local etime
+    etime=$(ps -o etime= -p "$1" 2>/dev/null | tr -d ' ')
+    [[ $etime =~ ^(([0-9]+)-)?(([0-9]+):)?([0-9]+):([0-9]+)$ ]] || return 1
+    echo $(( 10#${BASH_REMATCH[2]:-0} * 86400 + 10#${BASH_REMATCH[4]:-0} * 3600 \
+        + 10#${BASH_REMATCH[5]} * 60 + 10#${BASH_REMATCH[6]} ))
+}
+
 echo
 echo "zed-remote-open doctor (host '$remote_host', port $port)"
 
@@ -143,7 +153,7 @@ if [[ $tunnel_loaded == true ]]; then
         [[ -n $cmd ]] || continue
         if printf '%s' "$cmd" | grep -q 'ExitOnForwardFailure=yes'; then
             # Surviving the settle window is the evidence, not mere existence.
-            elapsed=$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ')
+            elapsed=$(elapsed_seconds "$pid" || true)
             if [[ -n $elapsed && $elapsed -ge $established_seconds ]]; then
                 ours="$ours $pid"
             elif [[ -z $ours ]]; then
@@ -236,7 +246,10 @@ if [[ $check_remote == true ]]; then
     if ! command -v ssh >/dev/null 2>&1; then
         warn "no ssh client on PATH"
     else
-        remote_probe="command -v zed >/dev/null && echo SENDER_OK || echo SENDER_MISSING; (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep -q '127.0.0.1:$port' && echo TUNNEL_OK || echo TUNNEL_MISSING"
+        # The sender is looked for in the installer's default bin dir too, because a
+        # non-interactive shell (zsh, notably) may never put it on PATH. A Linux box
+        # lists the forward as 127.0.0.1:<port>; macOS netstat writes 127.0.0.1.<port>.
+        remote_probe="{ command -v zed || test -x ~/.local/bin/zed; } >/dev/null 2>&1 && echo SENDER_OK || echo SENDER_MISSING; { { ss -ltn || netstat -ltn; } 2>/dev/null | grep -q '127.0.0.1:$port' || netstat -an -p tcp 2>/dev/null | grep -q '127[.]0[.]0[.]1[.]$port .*LISTEN'; } && echo TUNNEL_OK || echo TUNNEL_MISSING"
         result=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$remote_host" "$remote_probe" 2>&1 || true)
         printf '%s' "$result" | grep -q SENDER_OK && ok "zed sender on remote PATH" || warn "no zed sender on remote PATH"
         if printf '%s' "$result" | grep -q TUNNEL_OK; then

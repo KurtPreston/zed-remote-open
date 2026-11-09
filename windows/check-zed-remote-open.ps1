@@ -421,7 +421,10 @@ if ($CheckRemote) {
         Test-Warn 'no ssh client on PATH'
     }
     else {
-        $remoteProbe = "command -v zed >/dev/null && echo SENDER_OK || echo SENDER_MISSING; (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep -q '127.0.0.1:$Port' && echo TUNNEL_OK || echo TUNNEL_MISSING"
+        # The sender is looked for in the installer's default bin dir too, because a
+        # non-interactive shell (zsh, notably) may never put it on PATH. A Linux box
+        # lists the forward as 127.0.0.1:<port>; macOS netstat writes 127.0.0.1.<port>.
+        $remoteProbe = "{ command -v zed || test -x ~/.local/bin/zed; } >/dev/null 2>&1 && echo SENDER_OK || echo SENDER_MISSING; { { ss -ltn || netstat -ltn; } 2>/dev/null | grep -q '127.0.0.1:$Port' || netstat -an -p tcp 2>/dev/null | grep -q '127[.]0[.]0[.]1[.]$Port .*LISTEN'; } && echo TUNNEL_OK || echo TUNNEL_MISSING"
         $result = & ssh.exe -o BatchMode=yes -o ConnectTimeout=10 $RemoteHost $remoteProbe 2>&1
         $text = ($result | Out-String)
         if ($text -match 'SENDER_OK') { Test-Ok 'zed sender on remote PATH' } else { Test-Warn 'no zed sender on remote PATH' }
