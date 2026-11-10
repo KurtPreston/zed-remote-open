@@ -5,7 +5,9 @@
 # the reverse tunnel, the logs, and the placement inputs. Nothing here changes
 # state unless you pass --probe.
 #
-#   ./check-zed-remote-open.sh [--remote-host desktop] [--probe] [--check-remote]
+#   ./check-zed-remote-open.sh [--remote-host devbox] [--probe] [--check-remote]
+#
+# --remote-host defaults to the one the installer saved.
 
 set -uo pipefail
 
@@ -16,7 +18,7 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 . "$here/zed-placement.sh"
 
 port=$ZED_OPEN_PORT
-remote_host="desktop"
+remote_host=""
 probe=false
 check_remote=false
 established_seconds=10
@@ -35,6 +37,12 @@ while [[ $# -gt 0 ]]; do
         *) echo "check-zed-remote-open: unknown option '$1'" >&2; exit 2 ;;
     esac
 done
+
+if ! remote_host=$(resolve_remote_host "$remote_host"); then
+    echo "check-zed-remote-open: remote host unknown; pass --remote-host <alias>" >&2
+    echo "  or install with --remote-host so it is saved" >&2
+    exit 2
+fi
 
 failures=0
 warnings=0

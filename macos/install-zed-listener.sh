@@ -12,9 +12,12 @@
 # Zed CLI and ssh paths are resolved now and baked into the plist, because a
 # launchd agent starts with a minimal PATH.
 #
-#   ./install-zed-listener.sh
 #   ./install-zed-listener.sh --remote-host devbox
+#   ./install-zed-listener.sh
 #   ./install-zed-listener.sh --uninstall
+#
+# --remote-host is required on the first install. It is saved, so a re-install
+# without it reuses the last one.
 
 set -uo pipefail
 
@@ -23,7 +26,7 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 . "$here/zed-lib.sh"
 
 port=$ZED_OPEN_PORT
-remote_host="desktop"
+remote_host=""
 zed_bin=""
 ssh_bin=""
 no_tunnel=false
@@ -101,6 +104,15 @@ if [[ $uninstall == true ]]; then
 fi
 
 step "resolving dependencies"
+# Only the tunnel needs the dev box; fail before touching anything if it is unknown.
+if [[ $no_tunnel == false ]]; then
+    if ! remote_host=$(resolve_remote_host "$remote_host"); then
+        echo "install-zed-listener: remote host unknown; pass --remote-host <alias>" >&2
+        echo "  the ssh_connections host alias Zed uses for the dev box" >&2
+        exit 2
+    fi
+    detail "remote  : $remote_host"
+fi
 if ! zed_bin=$(resolve_zed_cli "$zed_bin"); then
     echo "install-zed-listener: could not locate the Zed CLI; pass --zed-bin" >&2
     exit 1
@@ -225,6 +237,11 @@ if [[ $no_tunnel == false ]]; then
 </plist>
 PLIST
     detail "wrote $tunnel_plist"
+    if save_remote_host "$remote_host"; then
+        detail "saved remote host to $ZED_REMOTE_HOST_FILE"
+    else
+        warn "could not save remote host to $ZED_REMOTE_HOST_FILE"
+    fi
 else
     bootout "$tunnel_label"
     rm -f "$tunnel_plist"

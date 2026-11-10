@@ -91,7 +91,7 @@ there is nothing to pass them to.
 
 ```powershell
 cd windows
-.\install-zed-listener.ps1
+.\install-zed-listener.ps1 -RemoteHost devbox
 ```
 
 This copies both scripts to `%LOCALAPPDATA%\zed-listener`, resolves the Zed CLI
@@ -101,10 +101,12 @@ restart themselves within a minute if they die:
 | Task | Does |
 | --- | --- |
 | `zed-open-listener` | serves `127.0.0.1:7682` and hands each URL to the local Zed |
-| `zed-open-tunnel` | keeps `ssh -N -R 7682:127.0.0.1:7682 desktop` up |
+| `zed-open-tunnel` | keeps `ssh -N -R 7682:127.0.0.1:7682 <remote-host>` up |
 
-Pass `-RemoteHost` if your dev box is not the default `desktop`; the tunnel needs
-it, and it has to be the same alias Zed and `ZED_SSH_HOST` use.
+`-RemoteHost` names your dev box. There is no default: it has to be the same alias
+Zed and `ZED_SSH_HOST` use. The installer saves it to `remote-host.txt` in the
+install directory, so a re-install or the check can leave it off; without a flag
+or a saved host, both stop with "remote host unknown".
 
 Re-running is idempotent. To remove everything:
 
@@ -327,12 +329,15 @@ so read this rather than translating the Windows section.
 
 ```bash
 cd macos
-./install-zed-listener.sh --remote-host desktop
+./install-zed-listener.sh --remote-host devbox
 ```
 
 This resolves the Zed CLI and `ssh`, writes two launchd agents into
-`~/Library/LaunchAgents`, and loads them. Pass `--remote-host` if your dev box is
-not the default `desktop`; it has to be the same alias Zed and `ZED_SSH_HOST` use.
+`~/Library/LaunchAgents`, and loads them. `--remote-host` names your dev box.
+There is no default: it has to be the same alias Zed and `ZED_SSH_HOST` use. The
+installer saves it to `~/Library/Application Support/zed-listener/remote-host`,
+so a re-install or the check can leave it off; without a flag or a saved host,
+both stop with "remote host unknown".
 
 Re-running is idempotent. To remove everything:
 
@@ -353,7 +358,7 @@ from its executable, so a copy elsewhere launches nothing.
 | Agent | Runs | Does |
 | --- | --- | --- |
 | `zed-remote-open.listener` | `zed-remote-open-listener` | serves `127.0.0.1:7682` and hands each URL to the local Zed |
-| `zed-remote-open.tunnel` | `zed-remote-open-tunnel` | keeps `ssh -N -R 7682:127.0.0.1:7682 desktop` up |
+| `zed-remote-open.tunnel` | `zed-remote-open-tunnel` | keeps `ssh -N -R 7682:127.0.0.1:7682 <remote-host>` up |
 
 Each agent runs its script directly, not through `/bin/bash`, because System
 Settings › General › Login Items lists a background agent by the name of the
