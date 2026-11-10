@@ -12,7 +12,8 @@
     only competes for the same remote port.
 
 .PARAMETER RemoteHost
-    The ssh_connections host alias, and the tunnel's ssh destination.
+    The ssh_connections host alias, and the tunnel's ssh destination. Defaults to
+    the one the installer saved.
 
 .PARAMETER Probe
     Send a real URL through the listener. This opens a Zed window.
@@ -30,7 +31,7 @@ param(
     [ValidateRange(1, 65535)]
     [int]$Port = 7682,
 
-    [string]$RemoteHost = 'desktop',
+    [string]$RemoteHost,
 
     [string]$ZedExe,
 
@@ -55,6 +56,9 @@ $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'ZedCli.ps1')
 . (Join-Path $PSScriptRoot 'ZedPlacement.ps1')
+. (Join-Path $PSScriptRoot 'ZedRemoteHost.ps1')
+
+$RemoteHost = Resolve-RemoteHost -Explicit $RemoteHost -InstallDir $InstallDir
 
 $script:Failures = 0
 $script:Warnings = 0

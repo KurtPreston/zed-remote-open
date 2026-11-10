@@ -19,6 +19,36 @@
 : "${ZED_LISTENER_STATE_DIR:=$HOME/Library/Application Support/zed-listener}"
 : "${ZED_STATE_FILE:=$ZED_LISTENER_STATE_DIR/open-projects.txt}"
 : "${ZED_DB:=$HOME/Library/Application Support/Zed/db/0-stable/db.sqlite}"
+: "${ZED_ENV_FILE:=$ZED_LISTENER_STATE_DIR/.env}"
+
+# --- remote host ------------------------------------------------------------
+# There is no default dev box: the alias is specific to each workstation. The
+# installer saves the one it was given as REMOTE_HOST in the .env file, so a
+# re-install and the doctor can reuse it without the flag. The file is parsed,
+# never sourced, so nothing in it runs.
+resolve_remote_host() {
+    # resolve_remote_host [explicit]; prints the host, or returns 1 if unknown.
+    local host=$1
+    if [[ -z $host && -f $ZED_ENV_FILE ]]; then
+        host=$(sed -n 's/^[[:space:]]*REMOTE_HOST=//p' "$ZED_ENV_FILE" | tail -n 1 |
+            tr -d "[:space:]\"'")
+    fi
+    [[ -n $host ]] || return 1
+    printf '%s\n' "$host"
+}
+
+save_remote_host() {
+    # save_remote_host HOST; replaces REMOTE_HOST and keeps any other keys.
+    local others=""
+    mkdir -p "$(dirname "$ZED_ENV_FILE")" || return 1
+    if [[ -f $ZED_ENV_FILE ]]; then
+        others=$(grep -v '^[[:space:]]*REMOTE_HOST=' "$ZED_ENV_FILE")
+    fi
+    {
+        [[ -n $others ]] && printf '%s\n' "$others"
+        printf 'REMOTE_HOST=%s\n' "$1"
+    } >"$ZED_ENV_FILE"
+}
 
 # Host, then an absolute POSIX path, then optional :line[:col]. The path charset
 # excludes ';', '&', '|', quotes and control characters, so a request cannot

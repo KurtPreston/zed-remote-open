@@ -17,7 +17,13 @@
     re-registered in place.
 
 .EXAMPLE
+    .\install-zed-listener.ps1 -RemoteHost devbox
+
+.EXAMPLE
     .\install-zed-listener.ps1
+
+    Re-installs with the remote host saved by the last install. -RemoteHost is
+    required the first time.
 
 .EXAMPLE
     .\install-zed-listener.ps1 -RemoteHost devbox -ZedExe 'C:\Tools\Zed\bin\Zed.exe'
@@ -30,7 +36,7 @@ param(
     [ValidateRange(1, 65535)]
     [int]$Port = 7682,
 
-    [string]$RemoteHost = 'desktop',
+    [string]$RemoteHost,
 
     [string]$ZedExe,
 
@@ -53,6 +59,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'ZedCli.ps1')
+. (Join-Path $PSScriptRoot 'ZedRemoteHost.ps1')
 
 $LogName = 'ZedLog.ps1'
 $PlacementName = 'ZedPlacement.ps1'
@@ -280,6 +287,11 @@ if ($Uninstall) {
 }
 
 Write-Step 'resolving dependencies'
+# Only the tunnel needs the dev box; fail before touching anything if it is unknown.
+if (-not $NoTunnel) {
+    $RemoteHost = Resolve-RemoteHost -Explicit $RemoteHost -InstallDir $InstallDir
+    Write-Detail "remote  : $RemoteHost"
+}
 $zedPath = Resolve-ZedCliPath -Explicit $ZedExe
 Write-Detail "zed cli : $zedPath"
 $pwshPath = Resolve-PwshExe
@@ -320,6 +332,8 @@ if (-not $NoTunnel) {
     $tunnelArgs = '-NoLogo -NoProfile -File "{0}" -Port {1} -RemoteHost "{2}" -SshExe "{3}" -LogFile "{4}"' -f
         $TunnelPath, $Port, $RemoteHost, $sshPath, $TunnelLogFile
     Write-HiddenVbs -Path $TunnelVbs -Exe $pwshPath -ArgLine $tunnelArgs
+    Save-RemoteHost -RemoteHost $RemoteHost -InstallDir $InstallDir
+    Write-Detail "saved remote host to $(Get-EnvFile -InstallDir $InstallDir)"
 }
 
 Write-Step 'registering Scheduled Tasks'
