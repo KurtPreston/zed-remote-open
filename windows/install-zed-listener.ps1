@@ -333,7 +333,7 @@ if (-not $NoTunnel) {
         $TunnelPath, $Port, $RemoteHost, $sshPath, $TunnelLogFile
     Write-HiddenVbs -Path $TunnelVbs -Exe $pwshPath -ArgLine $tunnelArgs
     Save-RemoteHost -RemoteHost $RemoteHost -InstallDir $InstallDir
-    Write-Detail "saved remote host to $(Get-RemoteHostFile -InstallDir $InstallDir)"
+    Write-Detail "saved remote host to $(Get-EnvFile -InstallDir $InstallDir)"
 }
 
 Write-Step 'registering Scheduled Tasks'

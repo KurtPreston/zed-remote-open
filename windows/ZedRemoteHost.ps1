@@ -3,13 +3,15 @@
     check-zed-remote-open.ps1.
 
     There is no default: the alias is specific to each workstation. The installer
-    saves the one it was given beside the installed scripts, so a re-install and
-    the doctor can reuse it without -RemoteHost.
+    saves the one it was given as REMOTE_HOST in a .env file beside the installed
+    scripts, so a re-install and the doctor can reuse it without -RemoteHost.
 #>
 
-function Get-RemoteHostFile {
+$RemoteHostKey = 'REMOTE_HOST'
+
+function Get-EnvFile {
     param([Parameter(Mandatory)][string]$InstallDir)
-    Join-Path $InstallDir 'remote-host.txt'
+    Join-Path $InstallDir '.env'
 }
 
 function Resolve-RemoteHost {
@@ -17,11 +19,15 @@ function Resolve-RemoteHost {
 
     if ($Explicit) { return $Explicit }
 
-    # Fall back to the alias the last install saved.
-    $file = Get-RemoteHostFile -InstallDir $InstallDir
+    # Fall back to the alias the last install saved; the last assignment wins.
+    $file = Get-EnvFile -InstallDir $InstallDir
     if (Test-Path -LiteralPath $file -PathType Leaf) {
-        $saved = (Get-Content -LiteralPath $file -TotalCount 1 -ErrorAction SilentlyContinue)
-        if ($saved -and $saved.Trim()) { return $saved.Trim() }
+        $line = @(Get-Content -LiteralPath $file | Where-Object { $_ -match "^\s*$RemoteHostKey=" }) |
+            Select-Object -Last 1
+        if ($line) {
+            $saved = ($line -replace "^\s*$RemoteHostKey=", '').Trim().Trim('"', "'")
+            if ($saved) { return $saved }
+        }
     }
 
     throw 'remote host unknown; pass -RemoteHost <alias>, the ssh_connections host Zed uses for the dev box'
@@ -29,5 +35,12 @@ function Resolve-RemoteHost {
 
 function Save-RemoteHost {
     param([Parameter(Mandatory)][string]$RemoteHost, [Parameter(Mandatory)][string]$InstallDir)
-    Set-Content -LiteralPath (Get-RemoteHostFile -InstallDir $InstallDir) -Value $RemoteHost -Encoding ASCII
+
+    # Replace REMOTE_HOST and keep any other keys in the file.
+    $file = Get-EnvFile -InstallDir $InstallDir
+    $others = @()
+    if (Test-Path -LiteralPath $file -PathType Leaf) {
+        $others = @(Get-Content -LiteralPath $file | Where-Object { $_ -notmatch "^\s*$RemoteHostKey=" })
+    }
+    Set-Content -LiteralPath $file -Value ($others + "$RemoteHostKey=$RemoteHost") -Encoding ASCII
 }

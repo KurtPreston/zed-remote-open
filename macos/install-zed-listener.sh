@@ -238,9 +238,9 @@ if [[ $no_tunnel == false ]]; then
 PLIST
     detail "wrote $tunnel_plist"
     if save_remote_host "$remote_host"; then
-        detail "saved remote host to $ZED_REMOTE_HOST_FILE"
+        detail "saved remote host to $ZED_ENV_FILE"
     else
-        warn "could not save remote host to $ZED_REMOTE_HOST_FILE"
+        warn "could not save remote host to $ZED_ENV_FILE"
     fi
 else
     bootout "$tunnel_label"

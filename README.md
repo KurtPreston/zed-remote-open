@@ -104,9 +104,9 @@ restart themselves within a minute if they die:
 | `zed-open-tunnel` | keeps `ssh -N -R 7682:127.0.0.1:7682 <remote-host>` up |
 
 `-RemoteHost` names your dev box. There is no default: it has to be the same alias
-Zed and `ZED_SSH_HOST` use. The installer saves it to `remote-host.txt` in the
-install directory, so a re-install or the check can leave it off; without a flag
-or a saved host, both stop with "remote host unknown".
+Zed and `ZED_SSH_HOST` use. The installer saves it as `REMOTE_HOST` in a `.env`
+file in the install directory, so a re-install or the check can leave it off;
+without a flag or a saved host, both stop with "remote host unknown".
 
 Re-running is idempotent. To remove everything:
 
@@ -335,9 +335,10 @@ cd macos
 This resolves the Zed CLI and `ssh`, writes two launchd agents into
 `~/Library/LaunchAgents`, and loads them. `--remote-host` names your dev box.
 There is no default: it has to be the same alias Zed and `ZED_SSH_HOST` use. The
-installer saves it to `~/Library/Application Support/zed-listener/remote-host`,
-so a re-install or the check can leave it off; without a flag or a saved host,
-both stop with "remote host unknown".
+installer saves it as `REMOTE_HOST` in
+`~/Library/Application Support/zed-listener/.env`, so a re-install or the check
+can leave it off; without a flag or a saved host, both stop with "remote host
+unknown".
 
 Re-running is idempotent. To remove everything:
 
